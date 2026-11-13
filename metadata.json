@@ -1,0 +1,6 @@
+{
+  "name": "Devashish Sunlit Homestay",
+  "description": "Clean, comfortable, and affordable homestay in Tapovan, Rishikesh with swimming pool, children's play area, and rooftop city views.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

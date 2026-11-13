@@ -1,0 +1,289 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'subhpan8449@gmail.com' ||
+        request.auth.token.email.matches('.*@devashish\\.in$') ||
+        exists(/databases/$(database)/documents/adminRoles/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // Admin Roles collection
+    match /adminRoles/{adminId} {
+      allow get: if isSignedIn() && (request.auth.uid == adminId || isAdmin());
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Rooms collection (publicly readable, admin editable)
+    match /rooms/{roomId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Facilities collection (swimming pool, play area, etc.)
+    match /facilities/{facilityId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Offers collection (student pricing, long stay, etc.)
+    match /offers/{offerId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Bookings collection
+    match /bookings/{bookingId} {
+      allow get: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && 
+                    request.resource.data.userId == request.auth.uid &&
+                    request.resource.data.status in ['pending', 'pending_approval', 'awaiting_approval', 'confirmed'];
+      allow update: if isAdmin() || (
+        isSignedIn() && 
+        resource.data.userId == request.auth.uid && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 
+          'cancellationReason', 
+          'cancellationRequestedAt',
+          'arrivalStatus', 
+          'arrivalNote', 
+          'arrivalReportedAt',
+          'checkoutRequested', 
+          'checkoutRequestedAt',
+          'customerRequests', 
+          'proposedChanges',
+          'updatedAt'
+        ])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Booking Status History (append-only timeline)
+    match /bookingStatusHistory/{historyId} {
+      allow read: if isAdmin() || isSignedIn();
+      allow create: if isSignedIn() || isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Inventory temporary holds during checkout
+    match /inventoryHolds/{holdId} {
+      allow read: if true;
+      allow create, update, delete: if true;
+    }
+
+    // Payment transactions
+    match /paymentTransactions/{transId} {
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // Kids Play Area settings
+    match /playAreaSettings/{settingId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Kids Play Area reservation slots
+    match /playAreaBookings/{slotId} {
+      allow get: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() || (
+        isSignedIn() && 
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Rooftop Packages
+    match /rooftopPackages/{packageId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Rooftop Bookings
+    match /rooftopBookings/{bookingId} {
+      allow get: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && 
+                    request.resource.data.userId == request.auth.uid &&
+                    request.resource.data.status == 'pending';
+      allow update: if isAdmin() || (
+        isSignedIn() && 
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Expenses ledger (strictly admin)
+    match /expenses/{expenseId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Business settings (public info readable, admin write)
+    match /businessSettings/{settingId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Customer Service Requests
+    match /serviceRequests/{requestId} {
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() || (
+        isSignedIn() && resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'reviewComment', 'status'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Housekeeping Tasks
+    match /housekeepingTasks/{taskId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    // Staff Members
+    match /staffMembers/{staffId} {
+      allow get, list, create, update, delete: if isAdmin();
+    }
+
+    // Room Pricing History
+    match /roomPricingHistory/{historyId} {
+      allow get, list, create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Customer Feedback & Reviews
+    match /customerFeedback/{feedbackId} {
+      allow get, list: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // 3D Room Configurations
+    match /room3DConfigs/{configId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Gemini AI business insights
+    match /aiInsights/{insightId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Admin audit logs (append-only by admin, no updates/deletes)
+    match /adminAuditLogs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // Notifications
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && (resource.data.recipientUid == request.auth.uid || resource.data.recipientUid == 'admin' || isAdmin());
+      allow list: if isSignedIn() && (resource.data.recipientUid == request.auth.uid || resource.data.recipientUid == 'admin' || isAdmin());
+      allow create: if isSignedIn() || isAdmin();
+      allow update: if isSignedIn() && 
+                    (resource.data.recipientUid == request.auth.uid || isAdmin()) &&
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isAdmin();
+    }
+
+    // Sunlit Play & Earn (Ganga Quest Progress)
+    match /gameProgress/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if isAdmin();
+    }
+
+    // Game Reward Vouchers
+    match /gameVouchers/{voucherId} {
+      allow get, list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn();
+      allow update: if isAdmin() || (
+        isSignedIn() && resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'usedInBookingReference'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Customer Support Conversations & Messages
+    match /conversations/{conversationId} {
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.customerId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.customerId == request.auth.uid;
+      allow update: if isAdmin() || (isSignedIn() && resource.data.customerId == request.auth.uid);
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow get, list: if isAdmin() || (isSignedIn() && get(/databases/$(database)/documents/conversations/$(conversationId)).data.customerId == request.auth.uid);
+        allow create: if isAdmin() || (isSignedIn() && get(/databases/$(database)/documents/conversations/$(conversationId)).data.customerId == request.auth.uid);
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // CookNow / Homestay Food Orders
+    match /foodOrders/{orderId} {
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // Festival Theme Configuration (15 themes, auto-schedule, active theme)
+    match /festivalThemeConfig/{configId} {
+      allow get, list: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Guest ID Documents & Verification (Aadhaar / Passport / Form C)
+    match /guestDocuments/{docId} {
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // Contact enquiries
+    match /contactEnquiries/{enquiryId} {
+      allow create: if true;
+      allow get, list, update, delete: if isAdmin();
+    }
+  }
+}
+

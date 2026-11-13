@@ -1,0 +1,505 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated user profile for guests and administrators",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["guest", "admin"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "fullName", "email", "role"]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Authorized administrator permissions and contact visibility",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "designation": { "type": "string" },
+        "role": { "type": "string", "enum": ["primary_owner", "co_partner", "admin"] },
+        "phone": { "type": "string" },
+        "isPublicVisible": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "disabled"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["email", "name", "role", "status"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Homestay room listing and inventory unit",
+      "type": "object",
+      "properties": {
+        "roomNumber": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "floor": { "type": "string" },
+        "viewType": { "type": "string", "enum": ["city", "hill", "garden", "standard"] },
+        "beds": { "type": "number" },
+        "bedType": { "type": "string" },
+        "adultCapacity": { "type": "number" },
+        "childCapacity": { "type": "number" },
+        "totalCapacity": { "type": "number" },
+        "amenities": { "type": "array" },
+        "images": { "type": "array" },
+        "basePrice": { "type": "number" },
+        "specialPrice": { "type": "number" },
+        "isActive": { "type": "boolean" },
+        "isMaintenance": { "type": "boolean" },
+        "availabilityStatus": { "type": "string", "enum": ["available", "occupied", "maintenance", "blocked", "cleaning"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["roomNumber", "name", "category", "basePrice", "adultCapacity", "totalCapacity", "isActive"]
+    },
+    "Facility": {
+      "title": "Facility",
+      "description": "Homestay amenities such as swimming pool, play area, and high-speed Wi-Fi",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "timings": { "type": "string" },
+        "rules": { "type": "array" },
+        "includedInBooking": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "icon": { "type": "string" }
+      },
+      "required": ["name", "description", "includedInBooking", "isActive"]
+    },
+    "Offer": {
+      "title": "Offer",
+      "description": "Special promotions including student pricing, long stay, and seasonal deals",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "discountType": { "type": "string", "enum": ["percentage", "fixed"] },
+        "discountValue": { "type": "number" },
+        "minStay": { "type": "number" },
+        "maxDiscount": { "type": "number" },
+        "validFrom": { "type": "string" },
+        "validTo": { "type": "string" },
+        "eligibleCategories": { "type": "array" },
+        "requiresIdVerification": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "description": { "type": "string" }
+      },
+      "required": ["name", "code", "discountType", "discountValue", "isActive"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Room reservation record",
+      "type": "object",
+      "properties": {
+        "bookingReference": { "type": "string" },
+        "roomId": { "type": "string" },
+        "roomName": { "type": "string" },
+        "roomCategory": { "type": "string" },
+        "userId": { "type": "string" },
+        "guestName": { "type": "string" },
+        "guestEmail": { "type": "string" },
+        "guestPhone": { "type": "string" },
+        "checkInDate": { "type": "string" },
+        "checkOutDate": { "type": "string" },
+        "adults": { "type": "number" },
+        "children": { "type": "number" },
+        "nights": { "type": "number" },
+        "basePricePerNight": { "type": "number" },
+        "roomSubtotal": { "type": "number" },
+        "discountApplied": { "type": "number" },
+        "offerCode": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "checked_in", "checked_out", "cancelled", "rejected"] },
+        "paymentStatus": { "type": "string", "enum": ["pay_at_property", "pending", "paid"] },
+        "specialRequests": { "type": "string" },
+        "internalNotes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["bookingReference", "roomId", "userId", "guestName", "guestEmail", "checkInDate", "checkOutDate", "nights", "totalAmount", "status"]
+    },
+    "PlayAreaSetting": {
+      "title": "PlayAreaSetting",
+      "description": "Operational schedules and capacity rules for the Children's Play Area",
+      "type": "object",
+      "properties": {
+        "morningSession": { "type": "string" },
+        "afternoonSession": { "type": "string" },
+        "eveningSession": { "type": "string" },
+        "slotDurationMinutes": { "type": "number" },
+        "maxChildrenPerSlot": { "type": "number" },
+        "minAge": { "type": "number" },
+        "maxAge": { "type": "number" },
+        "rules": { "type": "array" },
+        "isClosed": { "type": "boolean" },
+        "closureReason": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["morningSession", "afternoonSession", "eveningSession", "maxChildrenPerSlot", "isClosed"]
+    },
+    "PlayAreaBooking": {
+      "title": "PlayAreaBooking",
+      "description": "Guest reservation slot for the Kids Play Area",
+      "type": "object",
+      "properties": {
+        "bookingReference": { "type": "string" },
+        "userId": { "type": "string" },
+        "parentName": { "type": "string" },
+        "parentPhone": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "childName": { "type": "string" },
+        "childAge": { "type": "number" },
+        "date": { "type": "string" },
+        "session": { "type": "string", "enum": ["morning", "afternoon", "evening"] },
+        "timeSlot": { "type": "string" },
+        "status": { "type": "string", "enum": ["confirmed", "cancelled"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId", "parentName", "childName", "childAge", "date", "session", "timeSlot", "status"]
+    },
+    "RooftopPackage": {
+      "title": "RooftopPackage",
+      "description": "Private rooftop city-view experiences, dinners, and celebration setups",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "capacity": { "type": "number" },
+        "durationHours": { "type": "number" },
+        "availableSlots": { "type": "array" },
+        "inclusions": { "type": "array" },
+        "conditions": { "type": "array" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["name", "price", "capacity", "isActive"]
+    },
+    "RooftopBooking": {
+      "title": "RooftopBooking",
+      "description": "Guest reservation request for rooftop packages",
+      "type": "object",
+      "properties": {
+        "packageId": { "type": "string" },
+        "packageName": { "type": "string" },
+        "userId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "date": { "type": "string" },
+        "timeSlot": { "type": "string" },
+        "guestsCount": { "type": "number" },
+        "specialRequests": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "confirmed", "rejected", "cancelled"] },
+        "totalAmount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["packageId", "packageName", "userId", "customerName", "date", "timeSlot", "status", "totalAmount"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Property operational expense ledger record",
+      "type": "object",
+      "properties": {
+        "amount": { "type": "number" },
+        "category": { "type": "string", "enum": ["electricity", "water", "internet", "cleaning", "laundry", "staff", "maintenance", "supplies", "marketing", "repairs", "other"] },
+        "date": { "type": "string" },
+        "description": { "type": "string" },
+        "receiptUrl": { "type": "string" },
+        "enteredBy": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["amount", "category", "date", "description", "enteredBy"]
+    },
+    "BusinessSetting": {
+      "title": "BusinessSetting",
+      "description": "General homestay configuration and policies",
+      "type": "object",
+      "properties": {
+        "businessName": { "type": "string" },
+        "location": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "checkInTime": { "type": "string" },
+        "checkOutTime": { "type": "string" },
+        "allowPayAtProperty": { "type": "boolean" },
+        "publicAdminContact": { "type": "boolean" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["businessName", "location", "phone", "email"]
+    },
+    "CustomerServiceRequest": {
+      "title": "CustomerServiceRequest",
+      "description": "Guest service request including room cleaning, amenities, maintenance, and food assistance",
+      "type": "object",
+      "properties": {
+        "bookingReference": { "type": "string" },
+        "roomId": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "userId": { "type": "string" },
+        "guestName": { "type": "string" },
+        "guestPhone": { "type": "string" },
+        "category": { "type": "string", "enum": ["room_service", "guest_convenience", "food_service", "other"] },
+        "serviceType": { "type": "string" },
+        "description": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "preferredTime": { "type": "string" },
+        "status": { "type": "string", "enum": ["submitted", "received", "assigned", "in_progress", "completed", "cancelled"] },
+        "assignedStaffId": { "type": "string" },
+        "assignedStaffName": { "type": "string" },
+        "rating": { "type": "number" },
+        "reviewComment": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "completedAt": { "type": "string" }
+      },
+      "required": ["roomNumber", "userId", "guestName", "category", "serviceType", "priority", "status", "createdAt"]
+    },
+    "HousekeepingTask": {
+      "title": "HousekeepingTask",
+      "description": "Staff cleaning schedule, room inspection and turnover tasks",
+      "type": "object",
+      "properties": {
+        "roomNumber": { "type": "string" },
+        "roomId": { "type": "string" },
+        "taskType": { "type": "string", "enum": ["routine_cleaning", "checkout_turnover", "deep_clean", "inspection", "maintenance_fix"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "deadline": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "assigned", "in_progress", "completed", "needs_review"] },
+        "assignedStaffId": { "type": "string" },
+        "assignedStaffName": { "type": "string" },
+        "notes": { "type": "string" },
+        "inspectionPassed": { "type": "boolean" },
+        "inspectedBy": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "completedAt": { "type": "string" }
+      },
+      "required": ["roomNumber", "taskType", "priority", "status", "createdAt"]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Homestay staff personnel with designated roles and task track records",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "designation": { "type": "string", "enum": ["Housekeeping", "Reception", "Maintenance", "Guest Assistance", "Supervisor"] },
+        "active": { "type": "boolean" },
+        "responsibilities": { "type": "array" },
+        "completedTasksCount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "phone", "designation", "active", "createdAt"]
+    },
+    "RoomPricingHistory": {
+      "title": "RoomPricingHistory",
+      "description": "Audit trail of room price updates and seasonal adjustments",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "previousPrice": { "type": "number" },
+        "newPrice": { "type": "number" },
+        "priceType": { "type": "string" },
+        "changedBy": { "type": "string" },
+        "reason": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["roomId", "roomNumber", "previousPrice", "newPrice", "changedBy", "timestamp"]
+    },
+    "CustomerFeedback": {
+      "title": "CustomerFeedback",
+      "description": "Verified guest feedback and ratings for rooms, cleanliness, and facilities",
+      "type": "object",
+      "properties": {
+        "bookingReference": { "type": "string" },
+        "guestName": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "rating": { "type": "number" },
+        "category": { "type": "string" },
+        "comments": { "type": "string" },
+        "responseByOwner": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["guestName", "rating", "comments", "createdAt"]
+    },
+    "Room3DConfig": {
+      "title": "Room3DConfig",
+      "description": "3D dimensions, bed orientation, window view, and furniture configuration",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "roomNumber": { "type": "string" },
+        "dimensions": { "type": "object" },
+        "bedPosition": { "type": "object" },
+        "hasBalcony": { "type": "boolean" },
+        "windowView": { "type": "string" },
+        "furniture": { "type": "array" },
+        "verified3d": { "type": "boolean" },
+        "modelLabel": { "type": "string" }
+      },
+      "required": ["roomId", "roomNumber", "dimensions", "bedPosition", "verified3d", "modelLabel"]
+    },
+    "AIInsight": {
+      "title": "AIInsight",
+      "description": "Gemini AI business recommendations based on real Firestore data",
+      "type": "object",
+      "properties": {
+        "category": { "type": "string" },
+        "observedCondition": { "type": "string" },
+        "databaseFigures": { "type": "object" },
+        "explanation": { "type": "string" },
+        "suggestedAction": { "type": "string" },
+        "estimatedImpact": { "type": "string" },
+        "confidenceLevel": { "type": "string" },
+        "dataLimitations": { "type": "string" },
+        "status": { "type": "string", "enum": ["suggested", "approved", "dismissed"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["category", "observedCondition", "explanation", "suggestedAction", "status"]
+    },
+    "AdminAuditLog": {
+      "title": "AdminAuditLog",
+      "description": "Immutable security and audit trail of administrative modifications",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "performedBy": { "type": "string" },
+        "targetCollection": { "type": "string" },
+        "targetId": { "type": "string" },
+        "details": { "type": "object" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["action", "performedBy", "timestamp"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Customer and administrator in-app notification",
+      "type": "object",
+      "properties": {
+        "recipientUid": { "type": "string" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "link": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["recipientUid", "title", "message", "isRead"]
+    },
+    "ContactEnquiry": {
+      "title": "ContactEnquiry",
+      "description": "Customer contact form message and inquiry",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "message": { "type": "string" },
+        "status": { "type": "string", "enum": ["new", "responded", "archived"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "email", "message", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Customer profiles and account data"
+    },
+    "/adminRoles/{adminId}": {
+      "schema": "AdminRole",
+      "description": "Administrator roles and permissions"
+    },
+    "/rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Rooms inventory with pricing and capacity"
+    },
+    "/facilities/{facilityId}": {
+      "schema": "Facility",
+      "description": "Homestay facilities including pool and play area"
+    },
+    "/offers/{offerId}": {
+      "schema": "Offer",
+      "description": "Student, long-stay and seasonal promotional offers"
+    },
+    "/bookings/{bookingId}": {
+      "schema": "Booking",
+      "description": "Room reservations"
+    },
+    "/playAreaSettings/{settingId}": {
+      "schema": "PlayAreaSetting",
+      "description": "Children's play area timings and session limits"
+    },
+    "/playAreaBookings/{slotId}": {
+      "schema": "PlayAreaBooking",
+      "description": "Reservations for kids play area slots"
+    },
+    "/rooftopPackages/{packageId}": {
+      "schema": "RooftopPackage",
+      "description": "City-view and private date packages"
+    },
+    "/rooftopBookings/{bookingId}": {
+      "schema": "RooftopBooking",
+      "description": "Rooftop package reservations"
+    },
+    "/expenses/{expenseId}": {
+      "schema": "Expense",
+      "description": "Homestay operational expense ledger"
+    },
+    "/businessSettings/{settingId}": {
+      "schema": "BusinessSetting",
+      "description": "General business settings and policies"
+    },
+    "/serviceRequests/{requestId}": {
+      "schema": "CustomerServiceRequest",
+      "description": "Guest service requests and satisfaction ratings"
+    },
+    "/housekeepingTasks/{taskId}": {
+      "schema": "HousekeepingTask",
+      "description": "Daily room cleaning and turnover schedule"
+    },
+    "/staffMembers/{staffId}": {
+      "schema": "StaffMember",
+      "description": "Homestay staff personnel and roles"
+    },
+    "/roomPricingHistory/{historyId}": {
+      "schema": "RoomPricingHistory",
+      "description": "Audit trail of room price updates"
+    },
+    "/customerFeedback/{feedbackId}": {
+      "schema": "CustomerFeedback",
+      "description": "Guest reviews and satisfaction scores"
+    },
+    "/room3DConfigs/{configId}": {
+      "schema": "Room3DConfig",
+      "description": "3D dimensions and furniture configurations for rooms"
+    },
+    "/aiInsights/{insightId}": {
+      "schema": "AIInsight",
+      "description": "AI-generated business analysis and suggestions"
+    },
+    "/adminAuditLogs/{logId}": {
+      "schema": "AdminAuditLog",
+      "description": "Audit trail for admin actions"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "In-app notifications for guests and admins"
+    },
+    "/contactEnquiries/{enquiryId}": {
+      "schema": "ContactEnquiry",
+      "description": "Contact messages from visitors"
+    }
+  }
+}
