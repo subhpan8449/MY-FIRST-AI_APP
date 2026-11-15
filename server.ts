@@ -48,8 +48,268 @@ function cleanupExpiredHolds() {
 }
 
 // ==========================================
-// 1. GEMINI AI SERVER ENDPOINTS
+// 1. GEMINI AI SERVER ENDPOINTS (GEMINI 4 HYDROGEN + WORLD SEARCH GROUNDING)
 // ==========================================
+
+const GEMINI_MODEL = 'gemini-4-hydrogen';
+
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: { 'User-Agent': 'aistudio-build' }
+    }
+  });
+}
+
+interface GroundingSource {
+  title: string;
+  uri: string;
+}
+
+function extractGroundingSources(aiResponse: any): GroundingSource[] {
+  const chunks = aiResponse?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+  if (!Array.isArray(chunks)) return [];
+  const seen = new Set<string>();
+  const sources: GroundingSource[] = [];
+  for (const chunk of chunks) {
+    const uri = chunk?.web?.uri;
+    const title = chunk?.web?.title;
+    if (uri && !seen.has(uri)) {
+      seen.add(uri);
+      let domainLabel = uri;
+      try {
+        domainLabel = new URL(uri).hostname.replace(/^www\./, '');
+      } catch {
+        // keep raw uri
+      }
+      sources.push({
+        title: title || domainLabel,
+        uri
+      });
+    }
+  }
+  return sources.slice(0, 6);
+}
+
+function extractReplyText(aiResponse: any): string {
+  try {
+    const direct = aiResponse?.text;
+    if (typeof direct === 'string' && direct.trim().length > 0) {
+      return direct.trim();
+    }
+  } catch {
+    // ignore getter error
+  }
+  const parts = aiResponse?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    const nonThoughtText = parts
+      .filter((p: any) => typeof p?.text === 'string' && !p?.thought)
+      .map((p: any) => p.text)
+      .join('')
+      .trim();
+    if (nonThoughtText) return nonThoughtText;
+
+    const anyText = parts
+      .filter((p: any) => typeof p?.text === 'string')
+      .map((p: any) => p.text)
+      .join('')
+      .trim();
+    if (anyText) return anyText;
+  }
+  return '';
+}
+
+// Track temporary Google Search tool quota cooldown so chats stay instant on free-tier keys
+let searchQuotaExhaustedUntil = 0;
+
+interface CachedWeather {
+  summary: string;
+  fetchedAt: number;
+}
+let cachedWeather: CachedWeather | null = null;
+
+function mapWmoWeatherCode(code: number): string {
+  if (code === 0) return 'Clear sunny sky';
+  if (code <= 3) return 'Partly cloudy';
+  if (code <= 48) return 'Morning river mist / fog';
+  if (code <= 57) return 'Light drizzle';
+  if (code <= 67) return 'Rain showers';
+  if (code <= 77) return 'Himalayan snow higher up';
+  if (code <= 82) return 'Heavy rain showers';
+  return 'Thunderstorm / cloudy';
+}
+
+async function getLiveWorldWeatherAndClock(): Promise<string> {
+  const istNow = new Date().toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+
+  if (cachedWeather && Date.now() - cachedWeather.fetchedAt < 15 * 60 * 1000) {
+    return `Current Rishikesh IST Time: ${istNow}\n${cachedWeather.summary}`;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const resp = await fetch(
+      'https://api.open-meteo.com/v1/forecast?latitude=30.1309&longitude=78.3238&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FKolkata&forecast_days=3',
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+
+    if (resp.ok) {
+      const w: any = await resp.json();
+      const cur = w?.current;
+      const daily = w?.daily;
+      if (cur) {
+        const cond = mapWmoWeatherCode(Number(cur.weather_code ?? 0));
+        const todayHi = daily?.temperature_2m_max?.[0];
+        const todayLo = daily?.temperature_2m_min?.[0];
+        const rainProb = daily?.precipitation_probability_max?.[0];
+        const summary = `Live Tapovan / Rishikesh Weather Now: ${cur.temperature_2m}°C (${cond}), Humidity ${cur.relative_humidity_2m}%, Wind ${cur.wind_speed_10m} km/h | Today Range: ${todayLo}°C – ${todayHi}°C, Rain chance: ${rainProb ?? 0}%`;
+        cachedWeather = { summary, fetchedAt: Date.now() };
+        return `Current Rishikesh IST Time: ${istNow}\n${summary}`;
+      }
+    }
+  } catch {
+    // Non-blocking live weather fetch
+  }
+
+  return `Current Rishikesh IST Time: ${istNow}`;
+}
+
+async function runResilientGeminiChat(params: {
+  ai: GoogleGenAI;
+  baseInstruction: string;
+  contents: { role: 'user' | 'model'; parts: { text: string }[] }[];
+}): Promise<{ reply: string; sources: GroundingSource[]; grounded: boolean; modelUsed: string }> {
+  const trySearch = Date.now() > searchQuotaExhaustedUntil;
+
+  // Attempt 1: gemini-4-hydrogen with Google Search Grounding (if not in cooldown)
+  if (trySearch) {
+    try {
+      const searchInstruction = `${params.baseInstruction}
+
+2. LIVE WORLD KNOWLEDGE & GOOGLE SEARCH GROUNDING:
+Use your Google Search tool whenever helpful for current weather, live train/flight/transit status, Ganga Aarti timings, Char Dham updates, currency conversions, or any general world question.`;
+      const r1 = await params.ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: params.contents,
+        config: {
+          systemInstruction: searchInstruction,
+          tools: [{ googleSearch: {} }]
+        }
+      });
+      const text1 = extractReplyText(r1);
+      if (text1) {
+        return {
+          reply: text1,
+          sources: extractGroundingSources(r1),
+          grounded: true,
+          modelUsed: GEMINI_MODEL
+        };
+      }
+    } catch (err: any) {
+      const msg = String(err?.message || err || '');
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+        searchQuotaExhaustedUntil = Date.now() + 5 * 60 * 1000;
+      }
+      console.warn('Search-grounded Gemini call skipped/retried without search tool:', msg.slice(0, 140));
+    }
+  }
+
+  // Attempt 2: gemini-4-hydrogen WITHOUT tool declarations (clean prose instruction — never triggers MALFORMED_FUNCTION_CALL)
+  const directInstruction = `${params.baseInstruction}
+
+2. COMPREHENSIVE WORLD & TRAVEL KNOWLEDGE:
+Answer directly in clear, natural text using your full world knowledge along with the live Rishikesh weather/time and Homestay Master Profile provided above. Do NOT attempt to invoke external function calls or tools.`;
+
+  for (const candidateModel of [GEMINI_MODEL, 'gemini-3.1-flash-lite']) {
+    try {
+      const r2 = await params.ai.models.generateContent({
+        model: candidateModel,
+        contents: params.contents,
+        config: {
+          systemInstruction: directInstruction
+        }
+      });
+      const text2 = extractReplyText(r2);
+      if (text2) {
+        return {
+          reply: text2,
+          sources: [],
+          grounded: false,
+          modelUsed: candidateModel
+        };
+      }
+    } catch (modelErr: any) {
+      console.warn(`Gemini direct attempt (${candidateModel}) failed:`, modelErr?.message || modelErr);
+    }
+  }
+
+  throw new Error('All Gemini generation attempts returned empty output');
+}
+
+// GET /api/ai/status - Lightweight server AI readiness probe (no secrets exposed)
+app.get('/api/ai/status', (_req: Request, res: Response) => {
+  res.json({
+    configured: Boolean(process.env.GEMINI_API_KEY),
+    model: GEMINI_MODEL,
+    searchGrounding: Date.now() > searchQuotaExhaustedUntil
+  });
+});
+
+const HOMESTAY_MASTER_PROFILE = `
+DEVASHISH SUNLIT HOME STAY — COMPLETE PROPERTY & OPERATIONS PROFILE
+- Brand & Ownership: Devashish Sunlit Homestay, hosted by Subhashish Pandey & Vivek Singh Negi.
+- Location: Tapovan, Rishikesh, Uttarakhand, India (Near Laxman Jhula bypass; 1.2 km to Ram Jhula bridge walk, 1.8 km to Parmarth Niketan, ~2.8 km to Triveni Ghat, ~20 km / 40 min from Jolly Grant Airport Dehradun [typical cab fare ₹900–₹1,200], ~5 km from Yog Nagari Rishikesh Railway Station [auto ₹150–₹250], ~25 km from Haridwar Junction [cab ₹700–₹900 / auto ₹400], ~240 km / 5–6 hrs via NH-334 from New Delhi).
+- Direct Host Desk Phone: +91 9897335265 | Owner Email: subhpan8449@gmail.com.
+- Rooms (10+ Categories across Ground, 1st, 2nd & Top 3rd Floor, ₹599 to ₹1,599/night):
+  * Room 101 Budget Standard Room (Ground Floor, Queen Bed, max 3 guests): ₹799/night (Student special: ₹599).
+  * Room 102 Budget Double Room (Ground Floor, Garden view, Queen Bed, max 3): ₹999/night.
+  * Room 103 Deluxe Room (1st Floor, Hill view balcony nook, King Bed, Smart TV, max 3): ₹1,199/night.
+  * Room 104 Family Room (1st Floor, Hill view, 1 King + 1 Single Bed, max 5): ₹1,399/night.
+  * Room 201 Couple Special Room (2nd Floor, Private Balcony Mountain View, King Bed, max 2): ₹1,099/night.
+  * Room 202 Student Budget Room (2nd Floor, Study Desk, High-Speed Wi-Fi, Single Bed, max 1): ₹599/night.
+  * Room 203 City View Room (2nd Floor, Town & Hill Vista balcony, Queen Bed, max 3): ₹1,299/night.
+  * Room 301 Top Floor City View Room (3rd Floor, Panoramic City & Stargazing rooftop access, King Bed, max 3): ₹1,499/night.
+  * Room 302 Long Stay Budget Room (3rd Floor, Workstation & wardrobe, Queen Bed, max 3): ₹699/night.
+  * Room 303 Premium Family Room (3rd Floor, 1 King + 1 Queen Bed, Lounge seating, max 6): ₹1,599/night.
+- Complimentary Inclusions (Free with every room booking):
+  * Outdoor Freshwater Swimming Pool (7:00 AM – 7:30 PM; maintenance 1:00 PM – 2:30 PM; swimwear required, kids under 14 supervised).
+  * Dedicated Kids Play Area (Ages 2–12; Morning 8 AM–12 PM, Afternoon 3 PM–6 PM, Evening 6 PM–8 PM; socks required; guardian supervision mandatory).
+  * 3rd-Floor Rooftop City-View Terrace (6:00 AM – 10:00 PM; quiet hours after 9:30 PM). Private Rooftop Packages: Sunset Dinner Setup (₹1,800/couple), Celebration Deck (₹2,500 up to 6 guests), Morning Meditation & Chai (₹600).
+  * High-Speed Optical Fiber Wi-Fi (24/7 across rooms & balconies) + 24/7 Power Inverter Backup + Solar Hot Water.
+- Check-In / Check-Out & Policies:
+  * Standard Check-In: 12:00 PM | Standard Check-Out: 10:00 AM / 11:00 AM (Early check-in & late checkout accommodated politely subject to turnover availability).
+  * Payment Options: Pay at Property (cash/UPI upon arrival — 100% active) or Online via Razorpay when active.
+  * Valid Govt ID required at check-in (Aadhaar/Passport/DL/Voter ID; Foreign guests Form C supported).
+- Active Promo Codes & Discounts:
+  * STUDENT500: Flat ₹500 off (min 1 night, student ID verified at check-in).
+  * LONGSTAY20: 20% off (max ₹5,000, min 7 nights — popular with Yoga Teacher Training / remote workers).
+  * SUNLITCOUPLE: 12% off (max ₹1,000, min 2 nights).
+  * PILGRIM10: 10% off (max ₹800, pilgrims & senior citizens).
+  * Game Reward Vouchers (GANGA50, GANGA100, GANGA250) & Sunlit Rewards Loyalty Points (redeemable for stay discounts).
+- CookNow Homestyle & Satvik Dining (Delivered to Room, Rooftop Deck, or Poolside; 100% Pure Vegetarian & Satvik friendly; Pay on Delivery or Room Bill):
+  * Fresh Breakfast (Aloo Paratha with Curd ₹130, Indori Poha ₹95, Masala Chai ₹35, Pancakes ₹149), North Indian Thalis (Satvik Thali ₹229, Paneer Butter Masala ₹249, Dal Tadka ₹169), South Indian, Chinese, Healthy Bowls, Beverages & Desserts.
+- Rishikesh Quick Local Guide:
+  * Triveni Ghat Ganga Aarti: ~5:30 PM – 6:30 PM in winter / ~6:00 PM – 7:00 PM in summer (arrive 30 mins early for riverside seating).
+  * Parmarth Niketan Ganga Aarti (Swarg Ashram): ~5:30 PM – 6:30 PM winter / ~6:00 PM – 7:00 PM summer.
+  * River Rafting: Brahmapuri (9 km), Shivpuri (16 km), Marine Drive (26 km); best Sept–June (closed monsoon July–Aug).
+  * Nearby Waterfalls & Nature: Patna Waterfall (~6 km), Neer Garh Waterfall (~3.5 km), Vashistha Gufa (~22 km), Beatles Ashram (~3.5 km).
+- Interactive Features in App:
+  * 3D Interactive Room Walkthrough (Three.js), Sunlit Play & Earn (4 games earning points/vouchers), Sunlit Rewards Club (Explorer -> Pioneer -> Patron tiers).
+`;
 
 // POST /api/ai/advisor
 app.post('/api/ai/advisor', async (req: Request, res: Response) => {
@@ -59,15 +319,14 @@ app.post('/api/ai/advisor', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Metrics are required' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const ai = getGeminiClient();
+    if (!ai) {
       return res.json({ fallback: true, message: 'Server GEMINI_API_KEY not configured, using deterministic engine' });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
     const prompt = `
 You are a senior hospitality business advisor analyzing Devashish Sunlit Homestay in Tapovan, Rishikesh, Uttarakhand, India.
-This is a clean, affordable, family-friendly homestay with 11+ rooms, a swimming pool, a dedicated children's play area, and rooftop city views.
+This is a clean, affordable, family-friendly homestay with 10+ rooms, a swimming pool, a dedicated children's play area, and rooftop city views.
 
 Current Database Metrics:
 - Total Rooms: ${metrics.totalRooms}
@@ -101,25 +360,16 @@ Respond ONLY with a valid JSON array of objects conforming to:
 ]
 `;
 
-    const timeoutPromise = <T>(promise: Promise<T>, ms: number): Promise<T> =>
-      Promise.race([
-        promise,
-        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('AI call timed out')), ms))
-      ]);
-
-    const aiResponse = await timeoutPromise(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-      }),
-      6000
-    );
+    const aiResponse = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+    });
 
     const text = aiResponse.text || '';
     const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
-    return res.json({ success: true, insights: parsed });
+    return res.json({ success: true, insights: parsed, model: GEMINI_MODEL });
   } catch (error: any) {
     console.warn('Server Gemini Advisor fallback:', error?.message);
     return res.status(200).json({ fallback: true, error: error?.message });
@@ -134,12 +384,11 @@ app.post('/api/ai/command', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Question and metrics are required' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const ai = getGeminiClient();
+    if (!ai) {
       return res.json({ fallback: true, message: 'Server GEMINI_API_KEY not set' });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
     const prompt = `
 You are the AI Business Co-Pilot for Subhashish Pandey & Vivek Singh Negi, owners of Devashish Sunlit Homestay in Tapovan, Rishikesh.
 Answer the user's question accurately, concisely, and backed strictly by the provided hotel data.
@@ -175,74 +424,93 @@ Provide a structured response in plain JSON with:
 }
 `;
 
-    const timeoutPromise = <T>(promise: Promise<T>, ms: number): Promise<T> =>
-      Promise.race([
-        promise,
-        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('AI call timed out')), ms))
-      ]);
-
-    const aiResponse = await timeoutPromise(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-      }),
-      6000
-    );
+    const aiResponse = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+    });
 
     const text = aiResponse.text || '';
     const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
-    return res.json({ success: true, result: parsed });
+    return res.json({ success: true, result: parsed, model: GEMINI_MODEL });
   } catch (error: any) {
     console.warn('Server Gemini Command fallback:', error?.message);
     return res.status(200).json({ fallback: true, error: error?.message });
   }
 });
 
-// POST /api/ai/assistant - AI Guest Concierge
+// POST /api/ai/assistant - Ask Sunlit AI Concierge (Full Homestay + World Data Grounding)
 app.post('/api/ai/assistant', async (req: Request, res: Response) => {
   try {
-    const { message } = req.body;
-    if (!message) {
+    const { message, history = [], homestayContext = '', guestContext = '' } = req.body;
+    if (!message || !String(message).trim()) {
       return res.status(400).json({ error: 'Message is required' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.json({
-        success: true,
-        reply: "Welcome to Devashish Sunlit Homestay in Tapovan, Rishikesh! We offer 11+ peaceful rooms with swimming pool and children's play area privileges included. Check-in is at 12:00 PM and check-out at 10:00 AM. Our host desk is always available to assist."
+    const ai = getGeminiClient();
+    if (!ai) {
+      return res.status(503).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured on the server.',
+        reply: "Welcome to Devashish Sunlit Homestay in Tapovan, Rishikesh! AI Concierge live key is currently unconfigured; please reach our host desk (+91 9897335265) via 'Message Admin' for immediate help."
       });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
-    const prompt = `You are the AI Guest Concierge for Devashish Sunlit Homestay in Tapovan, Rishikesh, Uttarakhand, India.
-Property Highlights:
-- 11+ clean, sunlit rooms across ground and upper floors (Budget Standard, Deluxe Balcony with mountain air, Family Suites, Top Floor City View).
-- Inclusions for all guests at no additional charge: Outdoor freshwater swimming pool and dedicated children's indoor play area (ages 2-12).
-- Optical fiber Wi-Fi across rooms and balconies.
-- 3rd-floor rooftop terrace overlooking Rishikesh and sunset mountain ridge.
-- Authentic satvik & homestyle dining service powered by CookNow partner.
-- Check-in: 12:00 PM | Check-out: 10:00 AM (early check-in & late checkout requests accepted subject to turnover).
-- Flexible payment: Pay at property upon arrival or online via Razorpay.
-- Walking distance to Tapovan cafes, 1.2 km to Ram Jhula, 1.8 km to Parmarth Niketan.
+    const liveWeatherAndClock = await getLiveWorldWeatherAndClock();
 
-Respond warmly, politely, and concisely (2 to 4 sentences). Never fabricate outside rankings or fake policies.
-Guest inquiry: "${message}"`;
+    const baseInstruction = `You are "Ask Sunlit AI", the intelligent 24/7 Travel & Hospitality Concierge for DEVASHISH SUNLIT HOME STAY in Tapovan, Rishikesh, Uttarakhand, India.
 
-    const aiResponse = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt
+YOUR KNOWLEDGE SOURCES:
+1. LIVE HOMESTAY PROPERTY DATABASE & REAL-TIME WEATHER:
+${liveWeatherAndClock}
+${HOMESTAY_MASTER_PROFILE}
+${homestayContext ? `\nLIVE DATABASE SNAPSHOT:\n${homestayContext}` : ''}
+${guestContext ? `\nCURRENT SIGNED-IN GUEST CONTEXT:\n${guestContext}` : ''}
+
+RESPONSE GUIDELINES:
+- Be warm, clear, intelligent, and genuinely helpful—never generic or robotic.
+- Give complete, practical, well-structured answers (use clean bullet points or bold key numbers/prices/timings when helpful, without excessive length).
+- When recommending rooms, food, or discounts, cite exact room names/numbers/₹ prices, CookNow items, or promo codes (e.g., STUDENT500, LONGSTAY20, SUNLITCOUPLE, PILGRIM10).
+- If the guest asks a general world question unrelated to travel, answer accurately using your broad world knowledge, keeping a warm hospitality tone.
+- Never invent fake homestay bookings or guarantees (e.g., early check-in is subject to room availability and handled by our host desk via "Message Admin" or +91 9897335265).`;
+
+    const contents: { role: 'user' | 'model'; parts: { text: string }[] }[] = [];
+    if (Array.isArray(history)) {
+      const recent = history.slice(-10);
+      for (const turn of recent) {
+        const text = String(turn?.text || '').trim();
+        if (!text) continue;
+        contents.push({
+          role: turn?.sender === 'assistant' || turn?.role === 'model' ? 'model' : 'user',
+          parts: [{ text }]
+        });
+      }
+    }
+    contents.push({
+      role: 'user',
+      parts: [{ text: String(message).trim() }]
     });
 
-    const reply = aiResponse.text?.trim() || "Devashish Sunlit Homestay welcomes you to Tapovan, Rishikesh! How can we make your journey peaceful and memorable?";
-    return res.json({ success: true, reply });
-  } catch (error: any) {
-    console.warn('AI Assistant fallback:', error?.message);
+    const result = await runResilientGeminiChat({
+      ai,
+      baseInstruction,
+      contents
+    });
+
     return res.json({
       success: true,
-      reply: "Namaste! Devashish Homestay offers comfortable rooms in Tapovan with pool and play area access included. Feel free to contact our host desk directly at 9897335265."
+      reply: result.reply,
+      sources: result.sources,
+      grounded: result.grounded,
+      model: result.modelUsed
+    });
+  } catch (error: any) {
+    console.error('Ask Sunlit AI error:', error?.message || error);
+    return res.status(502).json({
+      success: false,
+      error: error?.message || 'AI Assistant temporarily unavailable',
+      reply: `I had a momentary connection issue reaching our live AI engine (${error?.message || 'network timeout'}). Please try sending your question again, or tap "Message Admin" to reach Subhashish Pandey directly at +91 9897335265.`
     });
   }
 });
@@ -250,6 +518,21 @@ Guest inquiry: "${message}"`;
 // ==========================================
 // 2. PRICING & INVENTORY HOLD ENDPOINTS
 // ==========================================
+
+function parseCanonicalDateUtcMs(dateStr: string): number | null {
+  if (typeof dateStr !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const utc = Date.UTC(y, mo - 1, d);
+  const verify = new Date(utc);
+  if (verify.getUTCFullYear() !== y || verify.getUTCMonth() !== mo - 1 || verify.getUTCDate() !== d) {
+    return null;
+  }
+  return utc;
+}
 
 // POST /api/pricing/calculate
 app.post('/api/pricing/calculate', (req: Request, res: Response) => {
@@ -260,10 +543,12 @@ app.post('/api/pricing/calculate', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Base price and dates are required' });
     }
 
-    const inDate = new Date(checkInDate);
-    const outDate = new Date(checkOutDate);
-    const diffTime = outDate.getTime() - inDate.getTime();
-    const nights = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    const inMs = parseCanonicalDateUtcMs(String(checkInDate));
+    const outMs = parseCanonicalDateUtcMs(String(checkOutDate));
+    if (inMs === null || outMs === null || outMs <= inMs) {
+      return res.status(400).json({ error: 'Please select valid dates.' });
+    }
+    const nights = Math.max(1, Math.round((outMs - inMs) / (1000 * 60 * 60 * 24)));
 
     const ratePerNight = Number(basePrice);
     const roomSubtotal = ratePerNight * nights;
@@ -334,17 +619,26 @@ app.post('/api/bookings/hold', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required parameters for hold' });
     }
 
-    const reqIn = new Date(checkInDate).getTime();
-    const reqOut = new Date(checkOutDate).getTime();
+    const reqInMs = parseCanonicalDateUtcMs(String(checkInDate));
+    const reqOutMs = parseCanonicalDateUtcMs(String(checkOutDate));
+    if (reqInMs === null || reqOutMs === null || reqOutMs <= reqInMs) {
+      return res.status(400).json({ error: 'Please select valid dates.' });
+    }
 
-    // Check if another active hold conflicts with requested dates
-    for (const [_, hold] of activeInventoryHolds.entries()) {
+    const reqInStr = String(checkInDate).trim();
+    const reqOutStr = String(checkOutDate).trim();
+
+    // Check if another active unexpired hold conflicts with requested dates
+    const now = Date.now();
+    for (const [id, hold] of activeInventoryHolds.entries()) {
+      if (hold.expiresAt <= now) {
+        activeInventoryHolds.delete(id);
+        continue;
+      }
       if (hold.roomId === roomId && hold.userId !== userId) {
-        const holdIn = new Date(hold.checkInDate).getTime();
-        const holdOut = new Date(hold.checkOutDate).getTime();
-        if (reqIn < holdOut && reqOut > holdIn) {
+        if (hold.checkInDate < reqOutStr && hold.checkOutDate > reqInStr) {
           return res.status(409).json({
-            error: 'Room is currently being booked by another guest. Please try another room or check back in a few minutes.'
+            error: 'Room is temporarily held.'
           });
         }
       }
@@ -356,8 +650,8 @@ app.post('/api/bookings/hold', (req: Request, res: Response) => {
     activeInventoryHolds.set(holdId, {
       holdId,
       roomId,
-      checkInDate,
-      checkOutDate,
+      checkInDate: reqInStr,
+      checkOutDate: reqOutStr,
       userId,
       expiresAt
     });
@@ -476,52 +770,181 @@ app.post('/api/game/redeem-voucher', (req: Request, res: Response) => {
   }
 });
 
+// Shared helper for automatic smart host desk replies & admin drafts
+async function buildSmartHostDeskReply(params: {
+  topic?: string;
+  customerName?: string;
+  lastMessage: string;
+  bookingReference?: string;
+  roomNumber?: string;
+  history?: any[];
+  homestayContext?: string;
+  guestContext?: string;
+}): Promise<{ reply: string; sources: GroundingSource[]; grounded: boolean }> {
+  const ai = getGeminiClient();
+  if (!ai) {
+    return {
+      reply: `Namaste ${params.customerName || 'Guest'} ji! Thank you for messaging Devashish Sunlit Homestay Host Desk regarding "${params.topic || 'your stay'}". Our team (Subhashish Pandey & Vivek Singh Negi) has received your message and will personally assist you shortly. Meanwhile, feel free to call our reception desk at +91 9897335265.`,
+      sources: [],
+      grounded: false
+    };
+  }
+
+  const liveWeatherAndClock = await getLiveWorldWeatherAndClock();
+
+  const baseInstruction = `You are the Official Host Desk & Front Office Manager for DEVASHISH SUNLIT HOME STAY in Tapovan, Rishikesh, replying directly to a guest inside "Message Admin" (hosted by Subhashish Pandey & Vivek Singh Negi).
+
+YOUR KNOWLEDGE SOURCES:
+1. LIVE HOMESTAY MASTER DATA, INVENTORY & WEATHER:
+${liveWeatherAndClock}
+${HOMESTAY_MASTER_PROFILE}
+${params.homestayContext ? `\nLIVE DATABASE SNAPSHOT:\n${params.homestayContext}` : ''}
+${params.guestContext ? `\nGUEST PROFILE & BOOKINGS:\n${params.guestContext}` : ''}
+
+CONVERSATION CONTEXT:
+- Guest Name: ${params.customerName || 'Guest'}
+- Selected Topic: ${params.topic || 'General Query'}
+${params.bookingReference ? `- Booking Reference: ${params.bookingReference}` : ''}
+${params.roomNumber ? `- Assigned Room Number: #${params.roomNumber}` : ''}
+
+REPLY RULES:
+- Greet the guest warmly by name ("Namaste ${params.customerName || 'Guest'} ji,") when natural (skip repetitive greeting on follow-up turns in an active thread).
+- Answer the guest's exact question thoroughly and accurately using both Homestay DB figures (room prices, timings, CookNow items, promo codes) and live World / Rishikesh Data.
+- Speak first-person plural as the Devashish Homestay Host Desk ("our team", "we at Devashish Sunlit Homestay").
+- If the request needs physical confirmation (e.g., early check-in at a specific time, custom cab pickup, room upgrade approval, group negotiation), give clear expectations/pricing right away AND confirm that our reception team (+91 9897335265) has also flagged this thread for Subhashish ji's personal follow-up.
+- Keep it warm, authoritative, well-formatted, and directly ready for the guest to read.`;
+
+  const contents: { role: 'user' | 'model'; parts: { text: string }[] }[] = [];
+  if (Array.isArray(params.history)) {
+    const recent = params.history.slice(-10);
+    for (const turn of recent) {
+      const text = String(turn?.text || '').trim();
+      if (!text) continue;
+      contents.push({
+        role: turn?.senderRole === 'admin' || turn?.role === 'model' ? 'model' : 'user',
+        parts: [{ text }]
+      });
+    }
+  }
+  const latest = String(params.lastMessage || '').trim();
+  const lastContent = contents[contents.length - 1];
+  if (!lastContent || lastContent.parts[0].text !== latest) {
+    contents.push({
+      role: 'user',
+      parts: [{ text: latest }]
+    });
+  }
+
+  try {
+    const result = await runResilientGeminiChat({
+      ai,
+      baseInstruction,
+      contents
+    });
+    return {
+      reply: result.reply,
+      sources: result.sources,
+      grounded: result.grounded
+    };
+  } catch (err: any) {
+    console.warn('Smart Host Desk fallback triggered:', err?.message);
+    return {
+      reply: `Namaste ${params.customerName || 'Guest'} ji! Thank you for contacting Devashish Sunlit Homestay regarding "${params.topic || 'your stay'}". Our host desk (Subhashish Pandey · +91 9897335265) has noted your message and is happy to assist you right away.`,
+      sources: [],
+      grounded: false
+    };
+  }
+}
+
+// POST /api/ai/admin-auto-reply - Automatic Smart Host Desk Reply for Message Admin
+app.post('/api/ai/admin-auto-reply', async (req: Request, res: Response) => {
+  try {
+    const {
+      topic,
+      customerName,
+      lastMessage,
+      message,
+      bookingReference,
+      roomNumber,
+      history = [],
+      homestayContext = '',
+      guestContext = ''
+    } = req.body;
+
+    const finalMessage = String(lastMessage || message || '').trim();
+    if (!finalMessage) {
+      return res.status(400).json({ error: 'Customer message is required' });
+    }
+
+    const result = await buildSmartHostDeskReply({
+      topic,
+      customerName,
+      lastMessage: finalMessage,
+      bookingReference,
+      roomNumber,
+      history,
+      homestayContext,
+      guestContext
+    });
+
+    return res.json({
+      success: true,
+      reply: result.reply,
+      sources: result.sources,
+      grounded: result.grounded,
+      senderName: 'Subhashish Pandey · Host Desk',
+      model: GEMINI_MODEL
+    });
+  } catch (error: any) {
+    console.error('Admin Auto-Reply error:', error?.message || error);
+    return res.status(502).json({
+      success: false,
+      error: error?.message || 'Smart Host Desk temporarily unavailable',
+      reply: `Namaste! Thank you for reaching out to Devashish Sunlit Homestay. Our host desk (Subhashish Pandey · +91 9897335265) has logged your message and will respond right away.`
+    });
+  }
+});
+
 // POST /api/ai/suggest-reply - Admin Customer Support AI Draft
 app.post('/api/ai/suggest-reply', async (req: Request, res: Response) => {
   try {
-    const { topic, customerName, lastMessage, bookingReference, roomNumber } = req.body;
+    const {
+      topic,
+      customerName,
+      lastMessage,
+      bookingReference,
+      roomNumber,
+      history = [],
+      homestayContext = '',
+      guestContext = ''
+    } = req.body;
     if (!lastMessage) {
       return res.status(400).json({ error: 'Customer message is required' });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.json({
-        success: true,
-        suggestedDraft: `Namaste ${customerName || 'Guest'}, thank you for contacting Devashish Sunlit Homestay in Tapovan, Rishikesh! We have received your query regarding ${topic || 'your stay'}. Our reception team is at your disposal. Swimming pool and kids play area access are always included with your booking. How may we assist you further?`
-      });
-    }
-
-    const ai = new GoogleGenAI({ apiKey });
-    const prompt = `You are the Hospitality Desk Manager for Devashish Sunlit Homestay in Tapovan, Rishikesh.
-Write a warm, polite, professional, and helpful reply to the following guest inquiry.
-Guest Name: ${customerName || 'Guest'}
-Topic: ${topic || 'General Inquiry'}
-${bookingReference ? `Booking Reference: ${bookingReference}` : ''}
-${roomNumber ? `Room Number: ${roomNumber}` : ''}
-Guest Message: "${lastMessage}"
-
-Homestay Facts:
-- 11+ rooms in Tapovan, Rishikesh with scenic mountain & city views.
-- Clean freshwater swimming pool & dedicated indoor kids play area included for all staying guests.
-- Satvik & homestyle dining available via CookNow partner.
-- 12:00 PM check-in, 10:00 AM check-out. Early check-in & late checkout accommodated when possible.
-- Optical fiber Wi-Fi and 3rd floor rooftop terrace.
-- Host contact: Subhashish Pandey / Vivek Singh Negi (9897335265).
-
-Keep the draft concise (2-4 sentences), polite, ready to be reviewed and sent by the host.`;
-
-    const aiResponse = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt
+    const result = await buildSmartHostDeskReply({
+      topic,
+      customerName,
+      lastMessage,
+      bookingReference,
+      roomNumber,
+      history,
+      homestayContext,
+      guestContext
     });
 
-    const suggestedDraft = aiResponse.text?.trim() || `Namaste ${customerName || 'Guest'}, thank you for reaching out! We are glad to help you with ${topic || 'your visit'}.`;
-    return res.json({ success: true, suggestedDraft });
-  } catch (error: any) {
-    console.warn('AI Suggest Reply fallback:', error?.message);
     return res.json({
       success: true,
+      suggestedDraft: result.reply,
+      sources: result.sources,
+      grounded: result.grounded,
+      model: GEMINI_MODEL
+    });
+  } catch (error: any) {
+    console.warn('AI Suggest Reply error:', error?.message);
+    return res.status(502).json({
+      success: false,
+      error: error?.message,
       suggestedDraft: `Namaste! Thank you for reaching out to Devashish Sunlit Homestay. We would be delighted to assist you with any questions regarding our rooms, pool, or Rishikesh travels.`
     });
   }

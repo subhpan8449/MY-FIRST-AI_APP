@@ -119,14 +119,75 @@
         "discountApplied": { "type": "number" },
         "offerCode": { "type": "string" },
         "totalAmount": { "type": "number" },
-        "status": { "type": "string", "enum": ["pending", "confirmed", "checked_in", "checked_out", "cancelled", "rejected"] },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "held",
+            "pending_approval",
+            "new_request",
+            "awaiting_approval",
+            "awaiting_admin_approval",
+            "awaiting_customer_confirmation",
+            "confirmed",
+            "payment_pending",
+            "payment_verification_pending",
+            "payment_verified",
+            "paid",
+            "checkin_due",
+            "checked_in",
+            "checkout_due",
+            "checked_out",
+            "cancellation_requested",
+            "cancelled",
+            "rejected",
+            "expired",
+            "failed",
+            "refund_pending",
+            "refunded",
+            "completed"
+          ]
+        },
         "paymentStatus": { "type": "string", "enum": ["pay_at_property", "pending", "paid"] },
+        "holdId": { "type": "string" },
         "specialRequests": { "type": "string" },
         "internalNotes": { "type": "string" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
       "required": ["bookingReference", "roomId", "userId", "guestName", "guestEmail", "checkInDate", "checkOutDate", "nights", "totalAmount", "status"]
+    },
+    "InventoryHold": {
+      "title": "InventoryHold",
+      "description": "Temporary 15-minute checkout lock for a specific room and date range",
+      "type": "object",
+      "properties": {
+        "holdId": { "type": "string" },
+        "roomId": { "type": "string" },
+        "roomName": { "type": "string" },
+        "userId": { "type": "string" },
+        "guestEmail": { "type": "string" },
+        "checkInDate": { "type": "string" },
+        "checkOutDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["held", "released", "converted", "expired"] },
+        "expiresAtMs": { "type": "number" },
+        "expiresAt": { "type": "string" },
+        "convertedBookingId": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["holdId", "roomId", "userId", "checkInDate", "checkOutDate", "status", "expiresAtMs"]
+    },
+    "RoomLock": {
+      "title": "RoomLock",
+      "description": "PII-free per-room availability lock ledger used inside Firestore atomic booking transactions",
+      "type": "object",
+      "properties": {
+        "roomId": { "type": "string" },
+        "slots": { "type": "array" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["roomId", "slots", "updatedAt"]
     },
     "PlayAreaSetting": {
       "title": "PlayAreaSetting",
@@ -436,6 +497,14 @@
     "/bookings/{bookingId}": {
       "schema": "Booking",
       "description": "Room reservations"
+    },
+    "/inventoryHolds/{holdId}": {
+      "schema": "InventoryHold",
+      "description": "Temporary booking checkout holds with automatic expiry"
+    },
+    "/roomLocks/{roomId}": {
+      "schema": "RoomLock",
+      "description": "PII-free atomic transaction lock index per room"
     },
     "/playAreaSettings/{settingId}": {
       "schema": "PlayAreaSetting",

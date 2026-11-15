@@ -2,7 +2,6 @@ import {
   collection, 
   doc, 
   setDoc, 
-  getDoc, 
   getDocs, 
   query, 
   where, 
@@ -10,11 +9,12 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
-  increment,
-  serverTimestamp 
+  increment
 } from 'firebase/firestore';
 import { db } from '../firebase';
-import { SupportConversation, SupportMessage, SupportTopic, UserProfile } from '../types';
+import { GroundingSource, SupportConversation, SupportMessage, SupportTopic, UserProfile } from '../types';
+import { sanitizeForFirestore } from './db';
+import { getLiveHomestayContextSnapshot, getGuestContextSnapshot } from './aiContextService';
 
 export const MessagingService = {
   // Find or create customer support conversation
@@ -35,7 +35,6 @@ export const MessagingService = {
 
       if (!snap.empty) {
         const existingDoc = snap.docs[0];
-        // If topic or room changed, update lightly
         if (topic && topic !== existingDoc.data().topic) {
           await updateDoc(existingDoc.ref, { topic, updatedAt: new Date().toISOString() });
         }
@@ -62,7 +61,7 @@ export const MessagingService = {
         updatedAt: new Date().toISOString()
       };
 
-      await setDoc(convRef, newConv);
+      await setDoc(convRef, sanitizeForFirestore(newConv));
       return convRef.id;
     } catch (err) {
       console.error('getOrCreateConversation error:', err);
@@ -74,13 +73,18 @@ export const MessagingService = {
   async sendMessage(
     conversationId: string,
     sender: { id: string; name: string; role: 'guest' | 'admin' | 'system' },
-    text: string
+    text: string,
+    options?: {
+      suggestedByAI?: boolean;
+      sources?: GroundingSource[];
+      isAutoReply?: boolean;
+    }
   ): Promise<string> {
     try {
       const messagesRef = collection(db, 'conversations', conversationId, 'messages');
       const nowIso = new Date().toISOString();
 
-      const newMsg = {
+      const newMsg: Record<string, any> = {
         conversationId,
         senderId: sender.id,
         senderName: sender.name,
@@ -90,11 +94,18 @@ export const MessagingService = {
         isRead: false
       };
 
-      const docRef = await addDoc(messagesRef, newMsg);
+      if (options?.suggestedByAI) {
+        newMsg.suggestedByAI = true;
+      }
+      if (options?.sources && options.sources.length > 0) {
+        newMsg.sources = options.sources;
+      }
+
+      const docRef = await addDoc(messagesRef, sanitizeForFirestore(newMsg));
 
       // Update parent conversation summary
       const convRef = doc(db, 'conversations', conversationId);
-      const updates: any = {
+      const updates: Record<string, any> = {
         lastMessage: text.trim(),
         lastMessageAt: nowIso,
         updatedAt: nowIso
@@ -104,8 +115,10 @@ export const MessagingService = {
         updates.status = 'unread';
         updates.unreadCountAdmin = increment(1);
       } else {
-        updates.status = 'pending'; // answered by admin
-        updates.unreadCountCustomer = increment(1);
+        updates.status = 'pending';
+        if (!options?.isAutoReply) {
+          updates.unreadCountCustomer = increment(1);
+        }
       }
 
       await updateDoc(convRef, updates);
@@ -113,6 +126,74 @@ export const MessagingService = {
     } catch (err) {
       console.error('sendMessage error:', err);
       throw err;
+    }
+  },
+
+  // Automatic Smart Host Desk reply when a guest messages Admin
+  async triggerAdminAutoReply(params: {
+    conversationId: string;
+    topic: SupportTopic;
+    customerName: string;
+    lastMessage: string;
+    history: SupportMessage[];
+    userId?: string | null;
+    userProfile?: UserProfile | null;
+    bookingReference?: string;
+    roomNumber?: string;
+    activeThemeName?: string;
+  }): Promise<string | null> {
+    try {
+      const [homestayContext, guestContext] = await Promise.all([
+        getLiveHomestayContextSnapshot(params.activeThemeName),
+        getGuestContextSnapshot(
+          params.userId,
+          params.userProfile,
+          params.bookingReference,
+          params.roomNumber
+        )
+      ]);
+
+      const res = await fetch('/api/ai/admin-auto-reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: params.topic,
+          customerName: params.customerName,
+          lastMessage: params.lastMessage,
+          bookingReference: params.bookingReference,
+          roomNumber: params.roomNumber,
+          history: params.history.slice(-10).map(m => ({
+            senderRole: m.senderRole,
+            text: m.text
+          })),
+          homestayContext,
+          guestContext
+        })
+      });
+
+      const data = await res.json();
+      const replyText = data?.reply?.trim();
+      if (!replyText) return null;
+
+      await this.sendMessage(
+        params.conversationId,
+        {
+          id: 'devashish-smart-host',
+          name: data?.senderName || 'Subhashish Pandey · Host Desk',
+          role: 'admin'
+        },
+        replyText,
+        {
+          suggestedByAI: true,
+          sources: Array.isArray(data?.sources) ? data.sources : [],
+          isAutoReply: true
+        }
+      );
+
+      return replyText;
+    } catch (err) {
+      console.error('triggerAdminAutoReply error:', err);
+      return null;
     }
   },
 
@@ -160,14 +241,17 @@ export const MessagingService = {
     });
   },
 
-  // Admin: Update status
+  // Admin: Update status (clean without undefined fields)
   async updateStatus(conversationId: string, status: 'unread' | 'pending' | 'resolved') {
     const ref = doc(db, 'conversations', conversationId);
-    await updateDoc(ref, {
+    const updates: Record<string, any> = {
       status,
-      unreadCountAdmin: status === 'resolved' ? 0 : undefined,
       updatedAt: new Date().toISOString()
-    });
+    };
+    if (status === 'resolved') {
+      updates.unreadCountAdmin = 0;
+    }
+    await updateDoc(ref, updates);
   },
 
   // Admin: Mark read for admin
@@ -205,19 +289,28 @@ export const MessagingService = {
     });
   },
 
-  // AI draft request to server endpoint
+  // AI draft request to server endpoint (uses live homestay + world data)
   async fetchAIDraftReply(params: {
     topic: string;
     customerName: string;
     lastMessage: string;
     bookingReference?: string;
     roomNumber?: string;
+    history?: SupportMessage[];
   }): Promise<string> {
     try {
+      const homestayContext = await getLiveHomestayContextSnapshot();
       const res = await fetch('/api/ai/suggest-reply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
+        body: JSON.stringify({
+          ...params,
+          history: (params.history || []).slice(-10).map(m => ({
+            senderRole: m.senderRole,
+            text: m.text
+          })),
+          homestayContext
+        })
       });
       const data = await res.json();
       return data.suggestedDraft || '';

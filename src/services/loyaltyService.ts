@@ -231,30 +231,52 @@ export async function awardPointsForBooking(
   bookingRef: string
 ): Promise<number> {
   try {
+    if (!userId) return 0;
+
+    // Idempotency guard: avoid double-crediting for the same booking reference
+    try {
+      const existingSnap = await getDocs(
+        query(collection(db, 'loyaltyTransactions'), where('userId', '==', userId))
+      );
+      const alreadyCredited = existingSnap.docs.some((d) => {
+        const data = d.data();
+        return data.type === 'earned' && data.bookingReference === bookingRef;
+      });
+      if (alreadyCredited) {
+        return 0;
+      }
+    } catch {
+      // Continue safely if index/query check skips
+    }
+
     const userRef = doc(db, 'users', userId);
     const userDoc = await getDoc(userRef);
-    const currentPoints = userDoc.exists() ? (userDoc.data().loyaltyPoints || 0) : 0;
-    const currentLifetime = userDoc.exists() ? (userDoc.data().lifetimeLoyaltyPoints || currentPoints) : 0;
+    const currentPoints = userDoc.exists() ? (userDoc.data().loyaltyPoints ?? 150) : 150;
+    const currentLifetime = userDoc.exists() ? (userDoc.data().lifetimeLoyaltyPoints ?? currentPoints) : currentPoints;
     const currentTier = userDoc.exists() ? (userDoc.data().loyaltyTier || 'explorer') : 'explorer';
 
-    const pointsToEarn = calculatePointsToEarn(totalAmount, currentTier as LoyaltyTier);
+    const pointsToEarn = Math.max(10, calculatePointsToEarn(totalAmount, currentTier as LoyaltyTier));
     const newPoints = currentPoints + pointsToEarn;
     const newLifetime = currentLifetime + pointsToEarn;
-    const newTier = getTierForPoints(newPoints);
+    const newTier = getTierForPoints(newLifetime);
 
-    await updateDoc(userRef, {
-      loyaltyPoints: newPoints,
-      lifetimeLoyaltyPoints: newLifetime,
-      loyaltyTier: newTier,
-      updatedAt: new Date().toISOString()
-    });
+    await setDoc(
+      userRef,
+      {
+        loyaltyPoints: newPoints,
+        lifetimeLoyaltyPoints: newLifetime,
+        loyaltyTier: newTier,
+        updatedAt: new Date().toISOString()
+      },
+      { merge: true }
+    );
 
     // Record transaction
     await addDoc(collection(db, 'loyaltyTransactions'), {
       userId,
       type: 'earned',
       points: pointsToEarn,
-      description: `Earned ${pointsToEarn} Sunlit points for stay reservation ${bookingRef}`,
+      description: `Booking Completed (${bookingRef}): Earned +${pointsToEarn} Sunlit Rewards points`,
       bookingReference: bookingRef,
       timestamp: new Date().toISOString()
     });
@@ -263,6 +285,45 @@ export async function awardPointsForBooking(
   } catch (err: any) {
     console.error('Error awarding loyalty points:', err);
     return 0;
+  }
+}
+
+export async function awardBonusPoints(
+  userId: string,
+  points: number,
+  description: string
+): Promise<boolean> {
+  try {
+    if (!userId || points <= 0) return false;
+    const userRef = doc(db, 'users', userId);
+    const userDoc = await getDoc(userRef);
+    const currentPoints = userDoc.exists() ? (userDoc.data().loyaltyPoints ?? 150) : 150;
+    const currentLifetime = userDoc.exists() ? (userDoc.data().lifetimeLoyaltyPoints ?? currentPoints) : currentPoints;
+    const newPoints = currentPoints + points;
+    const newLifetime = currentLifetime + points;
+
+    await setDoc(
+      userRef,
+      {
+        loyaltyPoints: newPoints,
+        lifetimeLoyaltyPoints: newLifetime,
+        loyaltyTier: getTierForPoints(newLifetime),
+        updatedAt: new Date().toISOString()
+      },
+      { merge: true }
+    );
+
+    await addDoc(collection(db, 'loyaltyTransactions'), {
+      userId,
+      type: 'bonus',
+      points,
+      description,
+      timestamp: new Date().toISOString()
+    });
+    return true;
+  } catch (err) {
+    console.error('Error awarding bonus points:', err);
+    return false;
   }
 }
 

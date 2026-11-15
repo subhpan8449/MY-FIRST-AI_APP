@@ -27,10 +27,10 @@ import {
 } from '../services/db';
 import {
   getUserLoyaltySummary,
-  UserLoyaltySummary,
-  LOYALTY_TIERS,
-  LOYALTY_REWARD_OPTIONS
+  awardBonusPoints,
+  UserLoyaltySummary
 } from '../services/loyaltyService';
+import { SunlitRewards } from './SunlitRewards';
 import {
   X,
   Calendar,
@@ -278,12 +278,18 @@ export const MyBookingsModal: React.FC<MyBookingsModalProps> = ({
 
     try {
       await submitCustomerFeedback({
+        userId: currentUser?.uid,
         guestName: userProfile?.fullName || currentUser?.displayName || 'Guest',
         roomNumber: feedbackRoomNumber || undefined,
         rating: feedbackRating,
         category: feedbackCategory,
-        comments: feedbackComments.trim()
+        comments: feedbackComments.trim(),
+        verifiedStay: true
       });
+      if (currentUser) {
+        await awardBonusPoints(currentUser.uid, 25, 'Guest Review Bonus (+25 Sunlit Points)');
+        await loadData();
+      }
       setFeedbackSuccess(true);
       setFeedbackComments('');
       setTimeout(() => setFeedbackSuccess(false), 4000);
@@ -293,8 +299,6 @@ export const MyBookingsModal: React.FC<MyBookingsModalProps> = ({
   };
 
   const currentPoints = loyaltySummary?.points ?? (userProfile?.loyaltyPoints || 0);
-  const currentTier = loyaltySummary?.tier ?? (userProfile?.loyaltyTier || 'explorer');
-  const tierInfo = LOYALTY_TIERS[currentTier] || LOYALTY_TIERS.explorer;
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
@@ -744,228 +748,14 @@ export const MyBookingsModal: React.FC<MyBookingsModalProps> = ({
             </div>
           )}
 
-          {/* TAB 2: SUNLIT REWARDS CLUB */}
+          {/* TAB 2: PROFILE & SUNLIT REWARDS CLUB */}
           {activeTab === 'loyalty' && (
-            <div className="space-y-6">
-              {/* Member Tier Header Card */}
-              <div className="bg-gradient-to-br from-amber-900 via-amber-800 to-stone-900 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
-                <div className="relative z-10 space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <Award className="w-5 h-5 text-amber-300" />
-                        <h4 className="text-lg font-extrabold tracking-tight">Sunlit Rewards Club</h4>
-                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-amber-400/20 text-amber-200 border border-amber-300/30">
-                          {tierInfo.name}
-                        </span>
-                      </div>
-                      <p className="text-xs text-amber-200/80 mt-1">
-                        Exclusive guest privileges and stay savings for Devashish Homestay guests
-                      </p>
-                    </div>
-
-                    <div className="bg-white/10 backdrop-blur-md px-4 py-2.5 rounded-xl border border-white/20 text-right">
-                      <span className="text-[10px] text-amber-200 uppercase font-bold tracking-wider block">Available Balance</span>
-                      <div className="flex items-baseline gap-1 justify-end">
-                        <span className="text-2xl font-black text-amber-300">{currentPoints}</span>
-                        <span className="text-xs font-bold text-amber-200">Points</span>
-                      </div>
-                      <span className="text-[11px] text-stone-200">Value: ₹{(currentPoints * 0.5).toFixed(0)} Stay Credit</span>
-                    </div>
-                  </div>
-
-                  {/* Tier Progress */}
-                  <div className="space-y-1.5 pt-2">
-                    <div className="flex justify-between text-xs text-amber-200/90 font-medium">
-                      <span>Tier: <strong className="text-white">{tierInfo.name}</strong></span>
-                      {loyaltySummary && loyaltySummary.nextTierPointsNeeded > 0 ? (
-                        <span>{loyaltySummary.nextTierPointsNeeded} points to next tier</span>
-                      ) : (
-                        <span className="text-amber-300 font-bold">Highest Tier Achieved!</span>
-                      )}
-                    </div>
-                    <div className="w-full bg-black/30 rounded-full h-2.5 overflow-hidden">
-                      <div
-                        className="bg-gradient-to-r from-amber-400 to-amber-200 h-full rounded-full transition-all duration-500"
-                        style={{
-                          width: `${Math.min(100, Math.max(10, (currentPoints / 1500) * 100))}%`
-                        }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-[10px] text-amber-300/60 font-semibold pt-0.5">
-                      <span>Explorer (0 pts)</span>
-                      <span>Ganga Pioneer (500 pts)</span>
-                      <span>Himalayan Patron (1500+ pts)</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* How to Earn & Redeem Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-amber-700" />
-                    <h5 className="font-bold text-stone-900 text-xs">How You Earn Points</h5>
-                  </div>
-                  <ul className="space-y-1.5 text-stone-600 text-[11px]">
-                    <li className="flex items-start gap-1.5">
-                      <span className="text-amber-700 font-bold">✓</span>
-                      <span><strong>{tierInfo.pointsRate} points per ₹100</strong> spent on all direct room bookings.</span>
-                    </li>
-                    <li className="flex items-start gap-1.5">
-                      <span className="text-amber-700 font-bold">✓</span>
-                      <span>Points credited automatically to your account upon checkout confirmation.</span>
-                    </li>
-                    <li className="flex items-start gap-1.5">
-                      <span className="text-amber-700 font-bold">✓</span>
-                      <span>Bonus points awarded for customer reviews and rooftop yoga sessions.</span>
-                    </li>
-                  </ul>
-                </div>
-
-                <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Gift className="w-4 h-4 text-purple-700" />
-                    <h5 className="font-bold text-stone-900 text-xs">How to Redeem</h5>
-                  </div>
-                  <ul className="space-y-1.5 text-stone-600 text-[11px]">
-                    <li className="flex items-start gap-1.5">
-                      <span className="text-purple-700 font-bold">✓</span>
-                      <span>Apply points during <strong>Step 4: Payment</strong> for instant rupee deductions.</span>
-                    </li>
-                    <li className="flex items-start gap-1.5">
-                      <span className="text-purple-700 font-bold">✓</span>
-                      <span>100 pts = ₹50 discount · 200 pts = ₹100 · 500 pts = ₹250 instant off.</span>
-                    </li>
-                    <li className="flex items-start gap-1.5">
-                      <span className="text-purple-700 font-bold">✓</span>
-                      <span>Can be combined with seasonal promo codes for maximum savings!</span>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-
-              {/* Reward Redemption Options */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h5 className="font-bold text-stone-900 text-xs flex items-center gap-1.5">
-                    <Sparkles className="w-4 h-4 text-amber-600" />
-                    <span>Instant Stay Rewards (Redeemable in Booking Checkout)</span>
-                  </h5>
-                  <span className="text-[11px] text-stone-500">100 pts = ₹50 credit</span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                  {LOYALTY_REWARD_OPTIONS.map((rew) => {
-                    const canAfford = currentPoints >= rew.pointsRequired;
-                    return (
-                      <div
-                        key={rew.id}
-                        className={`rounded-xl p-3.5 border transition-all ${
-                          canAfford
-                            ? 'bg-amber-50/40 border-amber-300 shadow-xs'
-                            : 'bg-stone-50/50 border-stone-200 opacity-75'
-                        }`}
-                      >
-                        <div className="flex justify-between items-start mb-1">
-                          <span className="font-bold text-stone-900 text-xs">{rew.name}</span>
-                          {rew.badge && (
-                            <span className="text-[9px] bg-amber-600 text-white font-bold px-1.5 py-0.2 rounded uppercase">
-                              {rew.badge}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[10px] text-stone-500 mb-2">{rew.description}</p>
-                        <div className="flex items-center justify-between pt-2 border-t border-stone-200">
-                          <span className="text-xs font-mono font-bold text-amber-900">
-                            🪙 {rew.pointsRequired} pts
-                          </span>
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                            canAfford ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-200 text-stone-600'
-                          }`}>
-                            {canAfford ? 'Ready to use' : `Need ${rew.pointsRequired - currentPoints} more`}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Tier Privileges Grid */}
-              <div className="space-y-3 pt-2">
-                <h5 className="font-bold text-stone-900 text-xs flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 text-stone-700" />
-                  <span>Member Tier Benefits</span>
-                </h5>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {(['explorer', 'pioneer', 'patron'] as const).map((tierKey) => {
-                    const t = LOYALTY_TIERS[tierKey];
-                    const isCurrent = currentTier === tierKey;
-                    return (
-                      <div
-                        key={tierKey}
-                        className={`p-4 rounded-xl border space-y-2.5 ${
-                          isCurrent
-                            ? 'bg-amber-50/50 border-amber-400 ring-2 ring-amber-300/40'
-                            : 'bg-white border-stone-200'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <h6 className="font-bold text-xs text-stone-900">{t.name}</h6>
-                          {isCurrent && (
-                            <span className="text-[10px] bg-amber-800 text-amber-100 font-bold px-2 py-0.5 rounded-full">
-                              Active
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-stone-500 font-mono">
-                          {t.minPoints === 0 ? 'Entry Tier' : `${t.minPoints}+ points`} · {t.pointsRate} pts/₹100
-                        </div>
-                        <ul className="space-y-1.5 text-[10px] text-stone-600">
-                          {t.perks.map((p, idx) => (
-                            <li key={idx} className="flex items-start gap-1">
-                              <span className="text-amber-700 font-bold">·</span>
-                              <span>{p}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Transaction Activity */}
-              {loyaltySummary && loyaltySummary.transactions && loyaltySummary.transactions.length > 0 && (
-                <div className="space-y-2 pt-2 border-t border-stone-200">
-                  <h5 className="font-bold text-stone-900 text-xs">Points Ledger &amp; Activity</h5>
-                  <div className="border border-stone-200 rounded-xl divide-y divide-stone-100 overflow-hidden bg-white">
-                    {loyaltySummary.transactions.map((tx) => (
-                      <div key={tx.id} className="p-3 flex items-center justify-between text-xs">
-                        <div>
-                          <p className="font-semibold text-stone-800">{tx.description}</p>
-                          <span className="text-[10px] text-stone-400">
-                            {new Date(tx.timestamp).toLocaleDateString()}
-                          </span>
-                        </div>
-                        <span
-                          className={`font-mono font-bold ${
-                            tx.type === 'earned' || tx.type === 'bonus'
-                              ? 'text-emerald-700'
-                              : 'text-purple-700'
-                          }`}
-                        >
-                          {tx.type === 'earned' || tx.type === 'bonus' ? '+' : '-'}
-                          {tx.points} pts
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+            <SunlitRewards
+              isModal={false}
+              initialBookings={bookings}
+              initialSummary={loyaltySummary}
+              onBookRoom={onClose}
+            />
           )}
 
           {/* TAB 3: SERVICES */}

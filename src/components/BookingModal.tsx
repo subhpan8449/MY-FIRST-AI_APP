@@ -1,7 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Room, Offer } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { createBooking, getOffers } from '../services/db';
+import { checkRoomAvailabilityDetailed, createBooking, getOffers } from '../services/db';
+import {
+  addDaysToDateString,
+  calculateNights,
+  getTodayDateString,
+  validateBookingRequest,
+  type AvailabilityCheckResult,
+} from '../utils/bookingAvailability';
 import {
   calculateServerPrice,
   createInventoryHold,
@@ -35,7 +42,6 @@ import {
   getUserLoyaltySummary,
   calculatePointsToEarn,
   redeemPointsForBooking,
-  awardPointsForBooking,
   LOYALTY_REWARD_OPTIONS,
   UserLoyaltySummary
 } from '../services/loyaltyService';
@@ -64,18 +70,14 @@ export const BookingModal: React.FC<BookingModalProps> = ({
 }) => {
   const { currentUser, userProfile, loginWithGoogle } = useAuth();
 
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dayAfter = new Date();
-  dayAfter.setDate(dayAfter.getDate() + 3);
+  const todayDateStr = getTodayDateString();
+  const defaultCheckIn = initialCheckIn && initialCheckIn >= todayDateStr ? initialCheckIn : addDaysToDateString(todayDateStr, 1);
+  const defaultCheckOut =
+    initialCheckOut && initialCheckOut > defaultCheckIn ? initialCheckOut : addDaysToDateString(defaultCheckIn, 2);
 
   const [roomId, setRoomId] = useState<string>(selectedRoom?.id || rooms[0]?.id || '');
-  const [checkInDate, setCheckInDate] = useState<string>(
-    initialCheckIn || tomorrow.toISOString().split('T')[0]
-  );
-  const [checkOutDate, setCheckOutDate] = useState<string>(
-    initialCheckOut || dayAfter.toISOString().split('T')[0]
-  );
+  const [checkInDate, setCheckInDate] = useState<string>(defaultCheckIn);
+  const [checkOutDate, setCheckOutDate] = useState<string>(defaultCheckOut);
   const [adults, setAdults] = useState<number>(initialGuests > 0 ? initialGuests : 2);
   const [childrenCount, setChildrenCount] = useState<number>(0);
   const [guestName, setGuestName] = useState<string>(userProfile?.fullName || '');
@@ -100,8 +102,12 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   });
   const [paymentMethod, setPaymentMethod] = useState<'pay_at_property' | 'online_razorpay'>('pay_at_property');
 
-  // 5-Step Process: Step 1 (Search Room), Step 2 (Select Room), Step 3 (Guest Details), Step 4 (Payment), Step 5 (Confirmation)
+  // 5-Step Process
   const [currentStep, setCurrentStep] = useState<'select_room' | 'guest_details' | 'payment' | 'confirmed'>('select_room');
+
+  // Live Availability State
+  const [availabilityState, setAvailabilityState] = useState<AvailabilityCheckResult | null>(null);
+  const [isCheckingAvailability, setIsCheckingAvailability] = useState<boolean>(false);
 
   // Server Calculated Price State
   const [nights, setNights] = useState<number>(1);
@@ -115,11 +121,15 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   const [redeemPoints, setRedeemPoints] = useState<number>(0);
   const [loyaltyDiscount, setLoyaltyDiscount] = useState<number>(0);
 
-  // Hold State
+  // Hold State + Session Countdown
   const [currentHoldId, setCurrentHoldId] = useState<string | null>(null);
+  const [holdExpiresAt, setHoldExpiresAt] = useState<number | null>(null);
+  const [holdSecondsLeft, setHoldSecondsLeft] = useState<number>(0);
+  const [isHoldExpired, setIsHoldExpired] = useState<boolean>(false);
 
-  // Form State
+  // Form State + Synchronous Double-Click Lock
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submitLockRef = useRef<boolean>(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [confirmedBooking, setConfirmedBooking] = useState<{
     reference: string;
@@ -172,9 +182,120 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   const pointsToEarn = calculatePointsToEarn(payableTotal, userLoyalty?.tier || 'explorer');
   const smartMatch = currentRoom ? computeSmartMatch(currentRoom, 'all', { adults, children: childrenCount }) : null;
 
+  const formatBookingError = (err: unknown): string => {
+    const raw = err instanceof Error ? err.message : String(err || '');
+    if (raw.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(raw);
+        const inner = String(parsed?.error || '');
+        const low = inner.toLowerCase();
+        if (low.includes('aborted') || low.includes('failed-precondition') || low.includes('contention')) {
+          return 'Another guest has just booked this room.';
+        }
+        if (low.includes('permission') || low.includes('unauthenticated')) {
+          return 'Please sign in with your verified Google account to book.';
+        }
+        if (low.includes('offline') || low.includes('unavailable') || low.includes('network')) {
+          return 'Unable to reach reservation database. Your details are saved—please check your connection and try again.';
+        }
+        return inner || 'Failed to complete booking. Please try again.';
+      } catch {
+        // fallback below
+      }
+    }
+    const lowerRaw = raw.toLowerCase();
+    if (lowerRaw.includes('aborted') || lowerRaw.includes('failed-precondition')) {
+      return 'Another guest has just booked this room.';
+    }
+    if (lowerRaw.includes('permission')) {
+      return 'Please sign in with your verified Google account to book.';
+    }
+    return raw || 'Failed to complete booking. Please try again.';
+  };
+
+  // Live availability verification whenever room, dates, or guest count changes
+  useEffect(() => {
+    if (!isOpen || !currentRoom) return;
+    let cancelled = false;
+
+    const verifyAvailability = async () => {
+      const localCheck = validateBookingRequest({
+        room: currentRoom,
+        checkInDate,
+        checkOutDate,
+        adults,
+        children: childrenCount,
+      });
+
+      if (!localCheck.valid) {
+        if (!cancelled) {
+          setAvailabilityState({
+            available: false,
+            status: localCheck.code || 'invalid_dates',
+            message: localCheck.error || 'Please select valid dates.',
+          });
+        }
+        return;
+      }
+
+      setIsCheckingAvailability(true);
+      try {
+        const res = await checkRoomAvailabilityDetailed(currentRoom.id, checkInDate, checkOutDate, {
+          requestingUserId: currentUser?.uid || null,
+          adults,
+          children: childrenCount,
+          room: currentRoom,
+        });
+        if (!cancelled) {
+          setAvailabilityState(res);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsCheckingAvailability(false);
+        }
+      }
+    };
+
+    verifyAvailability();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, currentRoom?.id, checkInDate, checkOutDate, adults, childrenCount, currentUser?.uid]);
+
+  // Hold session countdown timer (15-min TTL)
+  useEffect(() => {
+    if (!isOpen || currentStep !== 'payment' || !holdExpiresAt) return;
+
+    const tick = () => {
+      const remainingSec = Math.max(0, Math.ceil((holdExpiresAt - Date.now()) / 1000));
+      setHoldSecondsLeft(remainingSec);
+      if (remainingSec <= 0) {
+        setIsHoldExpired(true);
+        setErrorMessage('Your booking session has expired. Please refresh the room hold or go back to select dates again.');
+        if (currentHoldId) {
+          releaseInventoryHold(currentHoldId, currentRoom?.id, 'expired');
+          setCurrentHoldId(null);
+        }
+      }
+    };
+
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [isOpen, currentStep, holdExpiresAt, currentHoldId, currentRoom?.id]);
+
   // Recalculate server price whenever room, dates, or promo changes
   const runPriceCalculation = async () => {
     if (!currentRoom) return;
+    const validDates = calculateNights(checkInDate, checkOutDate) >= 1;
+    if (!validDates) {
+      setNights(0);
+      setRoomSubtotal(0);
+      setDiscountAmount(0);
+      setFinalTotal(0);
+      return;
+    }
+
     setIsCalculating(true);
     try {
       const basePrice = currentRoom.specialPrice || currentRoom.basePrice || 999;
@@ -200,14 +321,11 @@ export const BookingModal: React.FC<BookingModalProps> = ({
       }
     } catch (err: any) {
       console.warn('Server price calculation fallback:', err);
-      // Client fallback math
-      const inD = new Date(checkInDate);
-      const outD = new Date(checkOutDate);
-      const diff = Math.max(1, Math.ceil((outD.getTime() - inD.getTime()) / 86400000));
+      const calcNights = Math.max(1, calculateNights(checkInDate, checkOutDate));
       const rate = currentRoom.specialPrice || currentRoom.basePrice || 999;
-      setNights(diff);
-      setRoomSubtotal(rate * diff);
-      setFinalTotal(rate * diff);
+      setNights(calcNights);
+      setRoomSubtotal(rate * calcNights);
+      setFinalTotal(rate * calcNights);
     } finally {
       setIsCalculating(false);
     }
@@ -225,29 +343,48 @@ export const BookingModal: React.FC<BookingModalProps> = ({
     runPriceCalculation();
   };
 
-  const handleProceedToGuestDetails = (e: React.FormEvent) => {
+  const handleProceedToGuestDetails = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
 
-    if (new Date(checkInDate) >= new Date(checkOutDate)) {
-      setErrorMessage('Check-out date must be at least one day after check-in date.');
+    const validation = validateBookingRequest({
+      room: currentRoom,
+      checkInDate,
+      checkOutDate,
+      adults,
+      children: childrenCount,
+    });
+    if (!validation.valid) {
+      setErrorMessage(validation.error || 'Please select valid dates.');
       return;
     }
 
-    if (adults + childrenCount > (currentRoom?.totalCapacity || 4)) {
-      setErrorMessage(`Selected room accommodates maximum ${currentRoom?.totalCapacity} guests.`);
-      return;
+    setIsCheckingAvailability(true);
+    try {
+      const liveCheck = await checkRoomAvailabilityDetailed(currentRoom.id, checkInDate, checkOutDate, {
+        requestingUserId: currentUser?.uid || null,
+        adults,
+        children: childrenCount,
+        room: currentRoom,
+      });
+      setAvailabilityState(liveCheck);
+      if (!liveCheck.available) {
+        setErrorMessage(liveCheck.message);
+        return;
+      }
+      setCurrentStep('guest_details');
+    } finally {
+      setIsCheckingAvailability(false);
     }
-
-    setCurrentStep('guest_details');
   };
 
   const handleProceedToPayment = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitLockRef.current) return;
     setErrorMessage('');
 
     if (!currentUser) {
-      setErrorMessage('Please connect with Google or Email before proceeding to secure reservation.');
+      setErrorMessage('Please sign in with Google before proceeding to secure your reservation.');
       return;
     }
 
@@ -256,30 +393,59 @@ export const BookingModal: React.FC<BookingModalProps> = ({
       return;
     }
 
-    // Create 15-minute temporary inventory hold
+    const validation = validateBookingRequest({
+      room: currentRoom,
+      checkInDate,
+      checkOutDate,
+      adults,
+      children: childrenCount,
+    });
+    if (!validation.valid) {
+      setErrorMessage(validation.error || 'Please select valid dates.');
+      return;
+    }
+
+    submitLockRef.current = true;
+    setIsSubmitting(true);
     try {
       const hold = await createInventoryHold({
         roomId: currentRoom.id,
+        roomName: currentRoom.name,
         checkInDate,
         checkOutDate,
-        userId: currentUser.uid
+        userId: currentUser.uid,
+        adults,
+        children: childrenCount,
+        existingHoldId: currentHoldId,
       });
       setCurrentHoldId(hold.holdId);
+      setHoldExpiresAt(hold.expiresAt);
+      setHoldSecondsLeft(Math.max(0, Math.ceil((hold.expiresAt - Date.now()) / 1000)));
+      setIsHoldExpired(false);
       setCurrentStep('payment');
     } catch (err: any) {
-      setErrorMessage(err.message || 'Room is currently being reserved by another guest. Please choose another room.');
+      setErrorMessage(formatBookingError(err));
+    } finally {
+      setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
   const handleBackToRoomSelection = () => {
     setErrorMessage('');
+    if (currentHoldId) {
+      releaseInventoryHold(currentHoldId, currentRoom?.id);
+      setCurrentHoldId(null);
+      setHoldExpiresAt(null);
+    }
     setCurrentStep('select_room');
   };
 
   const handleBackToSearch = () => {
     if (currentHoldId) {
-      releaseInventoryHold(currentHoldId);
+      releaseInventoryHold(currentHoldId, currentRoom?.id);
       setCurrentHoldId(null);
+      setHoldExpiresAt(null);
     }
     onClose();
     const elem = document.getElementById('search-panel') || document.getElementById('rooms');
@@ -287,12 +453,26 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   };
 
   const handleFinalizeBooking = async () => {
+    // Prevent duplicate rapid submissions / double-clicks synchronously
+    if (submitLockRef.current || isSubmitting) return;
     setErrorMessage('');
+
+    if (!currentUser) {
+      setErrorMessage('Please sign in with Google before confirming your booking.');
+      return;
+    }
+
+    if (isHoldExpired || (holdExpiresAt !== null && Date.now() >= holdExpiresAt)) {
+      setIsHoldExpired(true);
+      setErrorMessage('Your booking session has expired. Please return to Guest Details or re-select dates to lock the room again.');
+      return;
+    }
+
+    submitLockRef.current = true;
     setIsSubmitting(true);
 
     try {
       if (paymentMethod === 'online_razorpay') {
-        // Step 1: Create order on server
         const orderRes = await createRazorpayOrder({
           amount: payableTotal,
           bookingReference: `DSH-${checkInDate.replace(/-/g, '')}`,
@@ -300,16 +480,13 @@ export const BookingModal: React.FC<BookingModalProps> = ({
           guestPhone
         });
 
-        // Step 2: Check Gateway status without simulated payments
         if (orderRes.gatewayPending || !paymentConfig.keyId) {
-          setIsSubmitting(false);
           setErrorMessage(
             'Payment Gateway Setup Pending: Online payment gateway is awaiting official Razorpay API keys from owner Subhashish Pandey. Your room can be confirmed immediately with "Pay at Property upon arrival" at 0 advance charge!'
           );
           setPaymentMethod('pay_at_property');
           return;
         } else {
-          // Live Razorpay SDK checkout
           const loadScript = (src: string) =>
             new Promise((resolve) => {
               const script = document.createElement('script');
@@ -353,7 +530,7 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                   roomId: currentRoom.id,
                   roomName: currentRoom.name,
                   roomCategory: currentRoom.category,
-                  userId: currentUser!.uid,
+                  userId: currentUser.uid,
                   guestName,
                   guestEmail,
                   guestPhone,
@@ -369,22 +546,24 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                   loyaltyPointsRedeemed: redeemPoints,
                   loyaltyDiscountAmount: loyaltyDiscount,
                   loyaltyPointsEarned: pointsToEarn,
+                  loyaltyPointsAwarded: false,
                   totalAmount: payableTotal,
                   paymentStatus: 'paid',
                   paymentMethod: 'online_razorpay',
                   razorpayOrderId: response.razorpay_order_id,
                   razorpayPaymentId: response.razorpay_payment_id,
                   paymentVerified: true,
+                  holdId: currentHoldId || undefined,
                   specialRequests: [specialRequests, `ID: ${idType} ${idNumber}`].filter(Boolean).join(' | '),
                   status: 'confirmed'
                 });
 
                 if (redeemPoints > 0) {
-                  await redeemPointsForBooking(currentUser!.uid, redeemPoints, loyaltyDiscount, bookingResult.bookingReference);
+                  await redeemPointsForBooking(currentUser.uid, redeemPoints, loyaltyDiscount, bookingResult.bookingReference);
                 }
-                await awardPointsForBooking(currentUser!.uid, payableTotal, bookingResult.bookingReference);
 
-                if (currentHoldId) await releaseInventoryHold(currentHoldId);
+                setCurrentHoldId(null);
+                setHoldExpiresAt(null);
 
                 setConfirmedBooking({
                   reference: bookingResult.bookingReference,
@@ -399,21 +578,25 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                 setCurrentStep('confirmed');
                 onBookingSuccess(bookingResult.bookingReference);
               } catch (e: any) {
-                setErrorMessage(e.message || 'Payment verification failed');
+                setErrorMessage(formatBookingError(e));
+              } finally {
+                setIsSubmitting(false);
+                submitLockRef.current = false;
               }
             }
           };
 
           const rzp = new (window as any).Razorpay(options);
           rzp.open();
+          return;
         }
       } else {
-        // Pay at Property Booking
+        // Atomic Transactional Pay at Property Booking
         const bookingResult = await createBooking({
           roomId: currentRoom.id,
           roomName: currentRoom.name,
           roomCategory: currentRoom.category,
-          userId: currentUser!.uid,
+          userId: currentUser.uid,
           guestName,
           guestEmail,
           guestPhone,
@@ -429,19 +612,21 @@ export const BookingModal: React.FC<BookingModalProps> = ({
           loyaltyPointsRedeemed: redeemPoints,
           loyaltyDiscountAmount: loyaltyDiscount,
           loyaltyPointsEarned: pointsToEarn,
+          loyaltyPointsAwarded: false,
           totalAmount: payableTotal,
           paymentStatus: 'pay_at_property',
           paymentMethod: 'pay_at_property',
+          holdId: currentHoldId || undefined,
           specialRequests: [specialRequests, `ID: ${idType} ${idNumber}`].filter(Boolean).join(' | '),
           status: 'pending'
         });
 
         if (redeemPoints > 0) {
-          await redeemPointsForBooking(currentUser!.uid, redeemPoints, loyaltyDiscount, bookingResult.bookingReference);
+          await redeemPointsForBooking(currentUser.uid, redeemPoints, loyaltyDiscount, bookingResult.bookingReference);
         }
-        await awardPointsForBooking(currentUser!.uid, payableTotal, bookingResult.bookingReference);
 
-        if (currentHoldId) await releaseInventoryHold(currentHoldId);
+        setCurrentHoldId(null);
+        setHoldExpiresAt(null);
 
         setConfirmedBooking({
           reference: bookingResult.bookingReference,
@@ -457,17 +642,21 @@ export const BookingModal: React.FC<BookingModalProps> = ({
         onBookingSuccess(bookingResult.bookingReference);
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to complete booking. Please try again.');
+      setErrorMessage(formatBookingError(err));
     } finally {
       setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
   const handleCancelHoldAndBack = async () => {
     if (currentHoldId) {
-      await releaseInventoryHold(currentHoldId);
+      await releaseInventoryHold(currentHoldId, currentRoom?.id);
       setCurrentHoldId(null);
+      setHoldExpiresAt(null);
     }
+    setIsHoldExpired(false);
+    setErrorMessage('');
     setCurrentStep('guest_details');
   };
 
@@ -651,13 +840,30 @@ export const BookingModal: React.FC<BookingModalProps> = ({
         ) : currentStep === 'payment' ? (
           // STEP 2: PAYMENT METHOD SELECTION & VERIFICATION
           <div className="p-6 overflow-y-auto space-y-5">
-            {/* Hold Banner */}
-            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 flex items-center gap-2.5 text-xs text-amber-900">
-              <Clock className="w-4 h-4 text-amber-700 shrink-0" />
-              <div>
-                <span className="font-bold">Room Held for 15 Minutes: </span>
-                <span>We are temporarily reserving {currentRoom?.name} exclusively for you to complete checkout.</span>
+            {/* Hold Banner with Live Countdown */}
+            <div className={`p-3 rounded-xl border flex items-center justify-between gap-2.5 text-xs ${
+              isHoldExpired
+                ? 'bg-red-50 border-red-200 text-red-900'
+                : 'bg-amber-50 border-amber-200 text-amber-900'
+            }`}>
+              <div className="flex items-center gap-2.5">
+                <Clock className={`w-4 h-4 shrink-0 ${isHoldExpired ? 'text-red-700' : 'text-amber-700'}`} />
+                <div>
+                  <span className="font-bold">
+                    {isHoldExpired ? 'Your booking session has expired: ' : 'Room Temporarily Held: '}
+                  </span>
+                  <span>
+                    {isHoldExpired
+                      ? 'Please go back to refresh availability and acquire a fresh 15-minute lock.'
+                      : `We are reserving ${currentRoom?.name} exclusively for you to complete checkout.`}
+                  </span>
+                </div>
               </div>
+              {!isHoldExpired && holdSecondsLeft > 0 && (
+                <span className="font-mono font-extrabold bg-white px-2.5 py-1 rounded-lg border border-amber-300 text-amber-950 shrink-0 tabular-nums">
+                  {String(Math.floor(holdSecondsLeft / 60)).padStart(2, '0')}:{String(holdSecondsLeft % 60).padStart(2, '0')}
+                </span>
+              )}
             </div>
 
             {errorMessage && (
@@ -850,11 +1056,14 @@ export const BookingModal: React.FC<BookingModalProps> = ({
               <button
                 type="button"
                 onClick={handleFinalizeBooking}
-                disabled={isSubmitting}
-                className="flex-1 py-2.5 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-stone-300 rounded-xl shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
+                disabled={isSubmitting || isHoldExpired}
+                className="flex-1 py-2.5 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-stone-300 disabled:cursor-not-allowed rounded-xl shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
               >
                 {isSubmitting ? (
-                  <span>Processing Reservation...</span>
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    <span>Processing Reservation...</span>
+                  </>
                 ) : (
                   <span>
                     {paymentMethod === 'online_razorpay'
@@ -1098,8 +1307,14 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                 <input
                   type="date"
                   value={checkInDate}
-                  min={new Date().toISOString().split('T')[0]}
-                  onChange={(e) => setCheckInDate(e.target.value)}
+                  min={todayDateStr}
+                  onChange={(e) => {
+                    const nextIn = e.target.value;
+                    setCheckInDate(nextIn);
+                    if (nextIn && (!checkOutDate || checkOutDate <= nextIn)) {
+                      setCheckOutDate(addDaysToDateString(nextIn, 1));
+                    }
+                  }}
                   className="w-full px-3 py-2 text-xs bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
                   required
                 />
@@ -1113,7 +1328,7 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                 <input
                   type="date"
                   value={checkOutDate}
-                  min={checkInDate}
+                  min={addDaysToDateString(checkInDate || todayDateStr, 1)}
                   onChange={(e) => setCheckOutDate(e.target.value)}
                   className="w-full px-3 py-2 text-xs bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
                   required
@@ -1203,6 +1418,39 @@ export const BookingModal: React.FC<BookingModalProps> = ({
               </div>
             </div>
 
+            {/* Live Room Availability Status Banner */}
+            <div className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+              isCheckingAvailability
+                ? 'bg-stone-50 border-stone-200 text-stone-600'
+                : availabilityState?.available
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : availabilityState?.status === 'temporarily_held'
+                ? 'bg-amber-50 border-amber-200 text-amber-900'
+                : 'bg-red-50 border-red-200 text-red-800'
+            }`}>
+              <div className="flex items-center gap-2 font-semibold">
+                {isCheckingAvailability ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-stone-300 border-t-amber-700 rounded-full animate-spin shrink-0" />
+                    <span>Checking live room availability...</span>
+                  </>
+                ) : availabilityState?.available ? (
+                  <>
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>Room is available for your selected dates ({nights} night{nights > 1 ? 's' : ''}).</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{availabilityState?.message || 'Please select valid dates.'}</span>
+                  </>
+                )}
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-white/80 border border-current/20 shrink-0">
+                {isCheckingAvailability ? 'Checking' : availabilityState?.available ? 'Available' : 'Unavailable'}
+              </span>
+            </div>
+
             {/* Actions for Step 2 */}
             <div className="flex gap-3 pt-2">
               <button
@@ -1214,10 +1462,10 @@ export const BookingModal: React.FC<BookingModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={isCalculating}
-                className="flex-1 py-2.5 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-stone-300 rounded-xl shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
+                disabled={isCalculating || isCheckingAvailability || (availabilityState !== null && !availabilityState.available)}
+                className="flex-1 py-2.5 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 disabled:bg-stone-300 disabled:cursor-not-allowed rounded-xl shadow-sm transition-colors cursor-pointer flex items-center justify-center gap-2"
               >
-                <span>Continue to Guest Details →</span>
+                <span>{isCheckingAvailability ? 'Checking Availability...' : 'Continue to Guest Details →'}</span>
               </button>
             </div>
           </form>

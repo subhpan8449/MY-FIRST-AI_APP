@@ -83,6 +83,7 @@ export interface Offer {
 
 export type BookingStatus =
   | 'pending'
+  | 'held'
   | 'pending_approval'
   | 'new_request'
   | 'awaiting_approval'
@@ -100,9 +101,49 @@ export type BookingStatus =
   | 'cancellation_requested'
   | 'cancelled'
   | 'rejected'
+  | 'expired'
+  | 'failed'
   | 'refund_pending'
   | 'refunded'
   | 'completed';
+
+export type HoldStatus = 'held' | 'released' | 'converted' | 'expired';
+
+export interface InventoryHold {
+  id: string;
+  holdId: string;
+  roomId: string;
+  roomName?: string;
+  userId: string;
+  guestEmail?: string;
+  checkInDate: string;
+  checkOutDate: string;
+  status: HoldStatus;
+  expiresAtMs: number;
+  expiresAt: string;
+  convertedBookingId?: string;
+  releasedBy?: string;
+  releasedAt?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface RoomLockSlot {
+  slotId: string;
+  kind: 'booking' | 'hold';
+  userId: string;
+  checkInDate: string;
+  checkOutDate: string;
+  status: string;
+  expiresAtMs?: number;
+  updatedAt: string;
+}
+
+export interface RoomLock {
+  roomId: string;
+  slots: RoomLockSlot[];
+  updatedAt: string;
+}
 
 export type PaymentStatus = 'pay_at_property' | 'pending' | 'paid';
 
@@ -148,6 +189,8 @@ export interface Booking {
   loyaltyPointsRedeemed?: number;
   loyaltyDiscountAmount?: number;
   loyaltyPointsEarned?: number;
+  loyaltyPointsAwarded?: boolean;
+  loyaltyAwardedAt?: string;
   totalAmount: number;
   status: BookingStatus;
   paymentStatus: PaymentStatus;
@@ -509,12 +552,20 @@ export interface RoomPricingHistory {
 
 export interface CustomerFeedback {
   id: string;
+  userId?: string;
   bookingReference?: string;
   guestName: string;
   roomNumber?: string;
   rating: number; // 1-5
   category: 'stay' | 'cleanliness' | 'service' | 'pool' | 'play_area' | 'rooftop';
   comments: string;
+  verifiedStay?: boolean;
+  subRatings?: {
+    cleanliness: number;
+    hospitality: number;
+    location: number;
+    dining: number;
+  };
   responseByOwner?: string;
   createdAt: string;
 }
@@ -701,6 +752,21 @@ export interface FestivalThemeMeta {
   effectType: 'diyas' | 'colors' | 'peacock' | 'snowfall' | 'confetti' | 'flames' | 'petals' | 'tri_color' | 'monsoon_rain' | 'subtle_glow' | 'none';
   audioEffect?: string;
   defaultDateWindow?: { startMonth: number; startDay: number; endMonth: number; endDay: number };
+  palette?: {
+    surfaceTint: string;
+    cardTint: string;
+    cardBorder: string;
+    headerBg: string;
+    headerText: string;
+    buttonBg: string;
+    buttonHover: string;
+    adminHeaderBg: string;
+    adminSidebarBg: string;
+    adminAccentBg: string;
+    adminAccentText: string;
+    adminBannerGradient: string;
+    glowHex: string;
+  };
 }
 
 export interface FestivalThemeConfig {
@@ -731,6 +797,11 @@ export type SupportTopic =
   | 'Rishikesh Sightseeing'
   | 'General Query';
 
+export interface GroundingSource {
+  title: string;
+  uri: string;
+}
+
 export interface SupportMessage {
   id: string;
   conversationId: string;
@@ -741,6 +812,7 @@ export interface SupportMessage {
   timestamp: string;
   isRead: boolean;
   suggestedByAI?: boolean;
+  sources?: GroundingSource[];
 }
 
 export interface SupportConversation {

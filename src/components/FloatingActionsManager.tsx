@@ -3,23 +3,17 @@ import {
   Bot, 
   Sparkles, 
   Headphones, 
-  MessageSquareText, 
   X, 
   Send, 
-  User, 
-  Clock, 
-  CheckCheck, 
-  ShieldCheck, 
-  ChevronDown, 
-  Maximize2, 
-  Minimize2,
-  PhoneCall,
+  Globe,
   ExternalLink
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useFestivalTheme } from '../context/FestivalThemeContext';
 import { CustomerSupportChatModal } from './CustomerSupportChatModal';
-import { SupportTopic } from '../types';
+import { GroundingSource } from '../types';
+import { getLiveHomestayContextSnapshot, getGuestContextSnapshot } from '../services/aiContextService';
+import { renderRichAiMessage } from '../utils/formatAiText';
 
 interface FloatingActionsManagerProps {
   onOpenBooking?: () => void;
@@ -32,19 +26,20 @@ interface AIChatMessage {
   sender: 'user' | 'assistant';
   text: string;
   timestamp: string;
+  sources?: GroundingSource[];
+  grounded?: boolean;
 }
 
 const AI_SUGGESTED_QUESTIONS = [
-  'Which room should I book for a couple or family?',
-  'What are the check-in (12 PM) and check-out (10 AM) rules?',
-  'How far is Ram Jhula & Parmarth Niketan from homestay?',
-  'How do I order CookNow fresh satvik meals to my room?',
-  'Tell me about the swimming pool & kids play area',
-  'How do I redeem Sunlit Reward points for room discounts?'
+  'Best room & price for my stay + active promo codes?',
+  'Rishikesh weather & Ganga Aarti timings today?',
+  'How to reach Tapovan from Delhi or Dehradun Airport?',
+  'Show CookNow satvik food menu & prices',
+  'Tell me about swimming pool & kids play area rules',
+  'Top cafés, waterfalls & rafting spots near Ram Jhula'
 ];
 
 export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
-  onOpenBooking,
   bookingReference,
   roomNumber
 }) => {
@@ -53,14 +48,14 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
 
   // Coordinated panel state: 'none' | 'ai' | 'support'
   const [activePanel, setActivePanel] = useState<'none' | 'ai' | 'support'>('none');
-  const [unreadHostCount, setUnreadHostCount] = useState<number>(0);
+  const [unreadHostCount] = useState<number>(0);
 
   // AI Assistant State
   const [aiMessages, setAiMessages] = useState<AIChatMessage[]>([
     {
       id: 'welcome',
       sender: 'assistant',
-      text: 'Namaste! Welcome to Devashish Sunlit Homestay in Tapovan, Rishikesh. I am your 24/7 AI Guest Concierge. How may I assist your Himalayan stay today?',
+      text: 'Namaste! I am **Ask Sunlit AI**, connected to both **Devashish Sunlit Homestay live data** (rooms, promo codes, CookNow satvik menu, pool & rooftop) and **live world travel knowledge** (weather, trains/flights, Ganga Aarti, local sightseeing, or any global question).\n\nHow may I assist you today?',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     }
   ]);
@@ -73,7 +68,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
     if (activePanel === 'ai') {
       aiMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [aiMessages, activePanel]);
+  }, [aiMessages, activePanel, isAiLoading]);
 
   // Global ESC key listener to dismiss open panel
   useEffect(() => {
@@ -86,7 +81,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activePanel]);
 
-  // Send message to Gemini AI Assistant endpoint
+  // Send message to Gemini AI Assistant endpoint with live context & history
   const handleSendAi = async (textToSend?: string) => {
     const question = (textToSend || aiInput).trim();
     if (!question || isAiLoading) return;
@@ -98,25 +93,43 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     };
 
+    const currentHistory = [...aiMessages];
     setAiMessages(prev => [...prev, userMsg]);
-    setAiInput('');
+    if (!textToSend) setAiInput('');
     setIsAiLoading(true);
 
     try {
+      const [homestayContext, guestContext] = await Promise.all([
+        getLiveHomestayContextSnapshot(themeMeta.name),
+        getGuestContextSnapshot(currentUser?.uid, userProfile, bookingReference, roomNumber)
+      ]);
+
       const res = await fetch('/api/ai/assistant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: question })
+        body: JSON.stringify({
+          message: question,
+          history: currentHistory.slice(-10).map(m => ({
+            sender: m.sender,
+            text: m.text
+          })),
+          homestayContext,
+          guestContext
+        })
       });
 
       const data = await res.json();
-      const replyText = data.reply || 'Thank you for asking. Our host desk in Tapovan (Subhashish & Vivek) is delighted to assist you directly!';
+      const replyText =
+        data.reply ||
+        'Thank you for asking. Our host desk in Tapovan (Subhashish & Vivek, +91 9897335265) is delighted to assist you directly!';
 
       const assistantMsg: AIChatMessage = {
         id: (Date.now() + 1).toString(),
         sender: 'assistant',
         text: replyText,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        sources: Array.isArray(data.sources) ? data.sources : [],
+        grounded: Boolean(data.grounded)
       };
 
       setAiMessages(prev => [...prev, assistantMsg]);
@@ -125,7 +138,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
       const fallbackMsg: AIChatMessage = {
         id: (Date.now() + 1).toString(),
         sender: 'assistant',
-        text: 'Devashish Sunlit Homestay is located in Tapovan, Rishikesh with scenic mountain views, swimming pool, and kids play area. Check-in is 12:00 PM and check-out is 10:00 AM. Please click "Message Admin" to speak directly with host Subhashish Pandey!',
+        text: 'Unable to reach Ask Sunlit AI right now. Please try again in a moment, or click **Human Help** to reach Subhashish Pandey directly via Message Admin (+91 9897335265).',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
       setAiMessages(prev => [...prev, fallbackMsg]);
@@ -148,7 +161,6 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
   const isHoli = activeTheme === 'holi';
   const isJanmashtami = activeTheme === 'janmashtami';
   const isChristmas = activeTheme === 'christmas';
-  const isNewYear = activeTheme === 'newyear';
 
   return (
     <>
@@ -178,7 +190,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
               ? 'bg-gradient-to-r from-red-950 via-emerald-950 to-stone-950 text-amber-200 border-emerald-400/40 shadow-red-900/20'
               : 'bg-stone-900/95 hover:bg-stone-900 text-amber-300 border-amber-500/40 shadow-black/50'
           }`}
-          title="Ask Sunlit AI Concierge (24/7)"
+          title="Ask Sunlit AI Concierge (Homestay + World Data)"
         >
           <div className="relative flex items-center justify-center">
             <Bot className="h-4 w-4 text-amber-300 group-hover:rotate-12 transition-transform" />
@@ -193,7 +205,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
           <Sparkles className="h-3 w-3 text-amber-400/80 animate-pulse hidden sm:inline" />
         </button>
 
-        {/* BUTTON TWO: MESSAGE ADMIN (HUMAN HOST DESK) */}
+        {/* BUTTON TWO: MESSAGE ADMIN (HOST DESK) */}
         <button
           onClick={toggleSupportPanel}
           aria-expanded={activePanel === 'support'}
@@ -203,7 +215,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
               ? 'bg-emerald-700 text-white border-emerald-300 ring-2 ring-emerald-400/50'
               : 'bg-slate-950/95 hover:bg-slate-900 text-stone-100 border-stone-600/60 shadow-black/60'
           }`}
-          title="Message Admin & Host Reception Desk (Subhashish & Vivek)"
+          title="Message Admin & Host Reception Desk (Instant Smart Desk + Live Host)"
         >
           <div className="relative flex items-center justify-center">
             <Headphones className="h-4 w-4 text-emerald-400 group-hover:scale-110 transition-transform" />
@@ -227,7 +239,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
       {/* ============================================================== */}
       {activePanel === 'ai' && (
         <div 
-          className="fixed bottom-36 sm:bottom-24 right-3 sm:right-6 z-50 w-[94vw] sm:w-[410px] h-[550px] max-h-[80vh] bg-white rounded-3xl shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-5 duration-200"
+          className="fixed bottom-36 sm:bottom-24 right-3 sm:right-6 z-50 w-[94vw] sm:w-[420px] h-[570px] max-h-[82vh] bg-white rounded-3xl shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-5 duration-200"
           role="dialog"
           aria-label="Ask Sunlit AI Concierge Window"
         >
@@ -240,11 +252,11 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
               <div>
                 <div className="flex items-center gap-2">
                   <h4 className="font-extrabold text-sm tracking-tight text-white">
-                    Ask Sunlit AI Concierge
+                    Ask Sunlit AI
                   </h4>
                   <span className="flex items-center gap-1 text-[9px] font-bold text-emerald-300 bg-emerald-950/70 border border-emerald-700/60 px-1.5 py-0.2 rounded-full">
-                    <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
-                    24/7 AI
+                    <Globe className="w-2.5 h-2.5 text-emerald-400" />
+                    World + Live DB
                   </span>
                 </div>
                 <p className="text-[10px] text-amber-200/80">
@@ -257,10 +269,10 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
               <button
                 onClick={() => setActivePanel('support')}
                 className="p-1 rounded-lg hover:bg-white/10 text-stone-300 hover:text-white transition cursor-pointer text-[10px] flex items-center gap-1 px-2"
-                title="Switch to human host support"
+                title="Switch to Message Admin host support"
               >
                 <Headphones className="w-3 h-3 text-emerald-400" />
-                <span className="hidden sm:inline">Human Help</span>
+                <span className="hidden sm:inline">Admin Desk</span>
               </button>
               <button
                 onClick={() => setActivePanel('none')}
@@ -285,15 +297,39 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
                   </div>
                 )}
                 <div
-                  className={`max-w-[84%] rounded-2xl p-3 shadow-2xs leading-relaxed ${
+                  className={`max-w-[85%] rounded-2xl p-3 shadow-2xs leading-relaxed ${
                     msg.sender === 'user'
                       ? 'bg-amber-800 text-white rounded-tr-none'
                       : 'bg-white text-stone-800 border border-stone-200 rounded-tl-none'
                   }`}
                 >
-                  <p className="whitespace-pre-line">{msg.text}</p>
+                  {msg.sender === 'user' ? (
+                    <p className="whitespace-pre-line">{msg.text}</p>
+                  ) : (
+                    renderRichAiMessage(msg.text, 'light')
+                  )}
+
+                  {msg.sender === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-stone-100 flex flex-wrap gap-1.5">
+                      {msg.sources.map((src, idx) => (
+                        <a
+                          key={idx}
+                          href={src.uri}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[10px] font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200/80 px-2 py-0.5 rounded-md transition max-w-[190px] truncate"
+                          title={src.title}
+                        >
+                          <Globe className="w-2.5 h-2.5 shrink-0 text-amber-600" />
+                          <span className="truncate">{src.title}</span>
+                          <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-70" />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+
                   <span
-                    className={`block text-[9px] mt-1 ${
+                    className={`block text-[9px] mt-1.5 ${
                       msg.sender === 'user' ? 'text-amber-200/70 text-right' : 'text-stone-400'
                     }`}
                   >
@@ -304,11 +340,11 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
             ))}
 
             {isAiLoading && (
-              <div className="flex gap-2 items-center text-stone-400 text-xs py-1">
+              <div className="flex gap-2 items-center text-stone-500 text-xs py-1">
                 <div className="w-6 h-6 rounded-full bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
                   <Bot className="w-3 h-3 animate-spin" />
                 </div>
-                <span className="italic">Grounded in Tapovan homestay data...</span>
+                <span className="italic">Searching live homestay &amp; world data...</span>
               </div>
             )}
             <div ref={aiMessagesEndRef} />
@@ -339,7 +375,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
               type="text"
               value={aiInput}
               onChange={(e) => setAiInput(e.target.value)}
-              placeholder="Ask anything about rooms, facilities, food, or Rishikesh..."
+              placeholder="Ask anything: rooms, Rishikesh weather, trains, world facts..."
               className="flex-1 px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-amber-700"
             />
             <button
@@ -354,7 +390,7 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
       )}
 
       {/* ============================================================== */}
-      {/* DEDICATED PANEL TWO: MESSAGE ADMIN (HUMAN SUPPORT)             */}
+      {/* DEDICATED PANEL TWO: MESSAGE ADMIN (SMART HOST DESK + HUMAN)   */}
       {/* ============================================================== */}
       <CustomerSupportChatModal
         isOpen={activePanel === 'support'}

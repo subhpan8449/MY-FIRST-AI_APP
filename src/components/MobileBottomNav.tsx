@@ -1,9 +1,10 @@
 import React from 'react';
-import { Home, Bed, Waves, Utensils, CalendarCheck, Shield, UserCheck } from 'lucide-react';
+import { Home, Bed, Waves, Utensils, CalendarCheck, Shield, UserCheck, Award } from 'lucide-react';
 
 interface MobileBottomNavProps {
   onOpenBookings: () => void;
   onOpenPlayAndEarn: () => void;
+  onOpenRewards?: () => void;
   onOpenAdmin?: () => void;
   onOpenAuth?: () => void;
   unreadCount?: number;
@@ -14,6 +15,7 @@ interface MobileBottomNavProps {
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   onOpenBookings,
   onOpenPlayAndEarn,
+  onOpenRewards,
   onOpenAdmin,
   onOpenAuth,
   unreadCount = 0,
@@ -33,7 +35,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   return (
     <nav
       aria-label="Mobile Bottom Navigation"
-      className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-stone-200 px-2 py-1.5 shadow-lg flex items-center justify-around"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-stone-200 px-1.5 py-1.5 shadow-lg flex items-center justify-around"
     >
       <button
         onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
@@ -55,7 +57,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         onClick={onOpenPlayAndEarn}
         className="flex flex-col items-center gap-0.5 text-amber-700 hover:text-amber-900 transition p-1 cursor-pointer relative"
       >
-        <span className="absolute -top-1 right-1 w-2 h-2 rounded-full bg-amber-500 animate-ping"></span>
+        <span className="absolute -top-0.5 right-1 w-2 h-2 rounded-full bg-amber-500 animate-ping"></span>
         <Waves className="w-4 h-4" />
         <span className="text-[10px] font-bold">Play</span>
       </button>
@@ -69,6 +71,17 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         <span className="text-[10px] font-semibold">Dining</span>
       </button>
 
+      {onOpenRewards && (
+        <button
+          onClick={onOpenRewards}
+          className="flex flex-col items-center gap-0.5 text-amber-800 hover:text-amber-950 transition p-1 cursor-pointer"
+          aria-label="Sunlit Rewards profile"
+        >
+          <Award className="w-4 h-4 text-amber-600" />
+          <span className="text-[10px] font-bold">Rewards</span>
+        </button>
+      )}
+
       <button
         onClick={onOpenBookings}
         className="flex flex-col items-center gap-0.5 text-stone-600 hover:text-amber-800 transition p-1 cursor-pointer relative"
@@ -79,7 +92,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
           </span>
         )}
         <CalendarCheck className="w-4 h-4" />
-        <span className="text-[10px] font-semibold">Bookings</span>
+        <span className="text-[10px] font-semibold">Stays</span>
       </button>
 
       {isAdmin && onOpenAdmin ? (

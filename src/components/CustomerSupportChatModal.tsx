@@ -3,18 +3,18 @@ import {
   X, 
   Send, 
   MessageSquare, 
-  Bot, 
-  User, 
-  Clock, 
-  CheckCheck, 
   ShieldCheck, 
   PhoneCall, 
   Sparkles,
-  HelpCircle
+  Globe,
+  ExternalLink,
+  Bot
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useFestivalTheme } from '../context/FestivalThemeContext';
 import { MessagingService } from '../services/messagingService';
-import { SupportConversation, SupportMessage, SupportTopic } from '../types';
+import { SupportMessage, SupportTopic } from '../types';
+import { renderRichAiMessage } from '../utils/formatAiText';
 
 interface CustomerSupportChatModalProps {
   isOpen: boolean;
@@ -35,11 +35,11 @@ const SUPPORT_TOPICS: SupportTopic[] = [
 ];
 
 const QUICK_PROMPTS = [
-  'What are the swimming pool timings?',
-  'Is children play area included with my stay?',
-  'Can I request early check-in at 10 AM?',
-  'What is the best time for Triveni Ghat evening aarti?',
-  'How do I order CookNow satvik meals to my room?'
+  'Can I request early check-in around 10 AM?',
+  'Which room is best for a family of 4 with promo discount?',
+  'What is the evening Triveni Ghat Ganga Aarti timing today?',
+  'How do I order CookNow satvik thali to my room?',
+  'Can reception help arrange pickup from Dehradun Airport?'
 ];
 
 export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> = ({
@@ -50,11 +50,13 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
   roomNumber
 }) => {
   const { currentUser, userProfile, loginWithGoogle } = useAuth();
+  const { themeMeta } = useFestivalTheme();
   const [topic, setTopic] = useState<SupportTopic>(initialTopic);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<SupportMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [sending, setSending] = useState(false);
+  const [isAutoReplying, setIsAutoReplying] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -65,7 +67,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, isAutoReplying]);
 
   // Load or create conversation on open
   useEffect(() => {
@@ -109,8 +111,11 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
   }, [isOpen, currentUser, topic, bookingReference, roomNumber, userProfile?.fullName, userProfile?.phone]);
 
   const handleSendMessage = async (textToSend?: string) => {
-    const text = textToSend || inputMessage;
-    if (!text.trim() || !conversationId || !currentUser) return;
+    const text = (textToSend || inputMessage).trim();
+    if (!text || !conversationId || !currentUser || sending) return;
+
+    const snapshotHistory = [...messages];
+    if (!textToSend) setInputMessage('');
 
     try {
       setSending(true);
@@ -123,11 +128,27 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
         },
         text
       );
-      if (!textToSend) setInputMessage('');
+      setSending(false);
+
+      // Immediately generate and deliver the best personalized Admin reply using live homestay + world data
+      setIsAutoReplying(true);
+      await MessagingService.triggerAdminAutoReply({
+        conversationId,
+        topic,
+        customerName: userProfile?.fullName || currentUser.displayName || 'Guest',
+        lastMessage: text,
+        history: snapshotHistory,
+        userId: currentUser.uid,
+        userProfile,
+        bookingReference,
+        roomNumber,
+        activeThemeName: themeMeta.name
+      });
     } catch (err) {
       console.error('Failed to send support message:', err);
     } finally {
       setSending(false);
+      setIsAutoReplying(false);
     }
   };
 
@@ -144,22 +165,22 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
               <MessageSquare className="h-5 w-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-white text-base sm:text-lg">Devashish Guest Support Desk</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-bold text-white text-base sm:text-lg">Message Admin · Host Desk</h3>
                 <span className="flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-400 border border-emerald-500/30">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Live Host
+                  Instant Smart Desk
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Direct communication with Subhashish Pandey & the Homestay Team
+                Subhashish Pandey &amp; Team · Powered by Live Homestay &amp; World Data
               </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
-            className="rounded-xl p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+            className="rounded-xl p-2 text-slate-400 hover:bg-slate-800 hover:text-white transition cursor-pointer"
           >
             <X className="h-5 w-5" />
           </button>
@@ -171,13 +192,13 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
             <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
               <ShieldCheck className="h-8 w-8" />
             </div>
-            <h4 className="text-xl font-bold text-white">Sign In to Chat with Our Host Desk</h4>
+            <h4 className="text-xl font-bold text-white">Sign In to Message Host Admin</h4>
             <p className="text-sm text-slate-300 max-w-md">
-              Securely sign in with your Google account to send real-time inquiries, track your responses, and manage room requests.
+              Sign in securely with your Google account to message host Subhashish Pandey directly and receive instant smart desk replies + personalized booking support.
             </p>
             <button
               onClick={() => loginWithGoogle()}
-              className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 px-6 py-3 font-semibold text-slate-950 shadow-lg shadow-amber-500/25 hover:brightness-110 transition"
+              className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 px-6 py-3 font-semibold text-slate-950 shadow-lg shadow-amber-500/25 hover:brightness-110 transition cursor-pointer"
             >
               Sign in with Google
             </button>
@@ -197,7 +218,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                 <button
                   key={t}
                   onClick={() => setTopic(t)}
-                  className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition ${
+                  className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition cursor-pointer ${
                     topic === t
                       ? 'bg-amber-500 text-slate-950 font-semibold shadow'
                       : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'
@@ -212,7 +233,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
             <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
               {loadingConv ? (
                 <div className="flex items-center justify-center h-full text-slate-400 text-sm">
-                  Connecting to support channel...
+                  Connecting to Devashish host desk...
                 </div>
               ) : messages.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-center space-y-3 py-8">
@@ -220,9 +241,9 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                     <Sparkles className="h-6 w-6" />
                   </div>
                   <div>
-                    <h5 className="font-bold text-white text-base">How can we help your Rishikesh journey?</h5>
+                    <h5 className="font-bold text-white text-base">Direct Line to Devashish Admin Desk</h5>
                     <p className="text-xs text-slate-400 max-w-sm mt-1">
-                      Ask about room availability, pool timings, early check-in, local taxi booking, or food menus.
+                      Send any message — you will receive an automatic smart host reply immediately, backed by live room data, CookNow menu, promo offers &amp; real-time travel info.
                     </p>
                   </div>
 
@@ -232,7 +253,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                       <button
                         key={i}
                         onClick={() => handleSendMessage(prompt)}
-                        className="rounded-xl border border-slate-800 bg-slate-800/50 px-3 py-1.5 text-xs text-slate-300 hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-white transition text-left"
+                        className="rounded-xl border border-slate-800 bg-slate-800/50 px-3 py-1.5 text-xs text-slate-300 hover:border-amber-500/50 hover:bg-amber-500/10 hover:text-white transition text-left cursor-pointer"
                       >
                         {prompt}
                       </button>
@@ -248,7 +269,13 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                       className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
                     >
                       <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mb-1 px-1">
-                        <span>{isMe ? 'You' : msg.senderName || 'Devashish Desk'}</span>
+                        <span>{isMe ? 'You' : msg.senderName || 'Subhashish Pandey · Host Desk'}</span>
+                        {!isMe && msg.suggestedByAI && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.2 text-[9px] text-emerald-300 font-semibold">
+                            <Sparkles className="h-2.5 w-2.5" />
+                            Auto Host Reply
+                          </span>
+                        )}
                         <span>•</span>
                         <span>
                           {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -256,18 +283,49 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                       </div>
 
                       <div
-                        className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                        className={`max-w-[85%] sm:max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                           isMe
                             ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-medium rounded-tr-none shadow-md shadow-amber-500/20'
                             : 'bg-slate-800/90 text-slate-100 border border-slate-700/80 rounded-tl-none shadow-sm'
                         }`}
                       >
-                        <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                        {isMe ? (
+                          <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                        ) : (
+                          renderRichAiMessage(msg.text, 'dark')
+                        )}
+
+                        {!isMe && msg.sources && msg.sources.length > 0 && (
+                          <div className="mt-2 pt-2 border-t border-slate-700/80 flex flex-wrap gap-1.5">
+                            {msg.sources.map((src, idx) => (
+                              <a
+                                key={idx}
+                                href={src.uri}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-[10px] text-amber-300 bg-slate-900/90 hover:bg-slate-950 border border-slate-700 px-2 py-0.5 rounded-md max-w-[200px] truncate transition"
+                                title={src.title}
+                              >
+                                <Globe className="w-2.5 h-2.5 shrink-0 text-emerald-400" />
+                                <span className="truncate">{src.title}</span>
+                                <ExternalLink className="w-2.5 h-2.5 shrink-0 opacity-70" />
+                              </a>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
                 })
               )}
+
+              {isAutoReplying && (
+                <div className="flex items-start gap-2 text-xs text-emerald-300/90 bg-slate-800/60 border border-emerald-500/20 rounded-2xl px-3.5 py-2.5 max-w-[80%]">
+                  <Bot className="w-4 h-4 text-emerald-400 animate-spin shrink-0 mt-0.5" />
+                  <span>Subhashish Pandey · Host Desk is preparing your instant smart reply...</span>
+                </div>
+              )}
+
               <div ref={messagesEndRef} />
             </div>
 
@@ -284,20 +342,20 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                   type="text"
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
-                  placeholder="Type your message to Devashish host desk..."
+                  placeholder="Message Devashish Admin Desk (auto-replied instantly)..."
                   disabled={sending}
                   className="flex-1 rounded-2xl border border-slate-700 bg-slate-900/90 px-4 py-3 text-sm text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none disabled:opacity-50"
                 />
                 <button
                   type="submit"
                   disabled={sending || !inputMessage.trim()}
-                  className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500 text-slate-950 font-bold transition hover:brightness-110 disabled:opacity-40 shrink-0 shadow-lg shadow-amber-500/20"
+                  className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500 text-slate-950 font-bold transition hover:brightness-110 disabled:opacity-40 shrink-0 shadow-lg shadow-amber-500/20 cursor-pointer"
                 >
                   <Send className="h-5 w-5" />
                 </button>
               </form>
               <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500 px-1">
-                <span>Direct response from owner Subhashish Pandey & desk team</span>
+                <span>Instant Smart Desk + Direct Human Follow-up (Subhashish Pandey)</span>
                 <span>Tapovan, Rishikesh</span>
               </div>
             </div>

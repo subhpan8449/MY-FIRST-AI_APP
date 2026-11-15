@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useFestivalTheme } from '../context/FestivalThemeContext';
 import {
   User,
   Shield,
@@ -18,7 +19,10 @@ import {
   Utensils,
   RefreshCw,
   Award,
-  Headphones
+  Headphones,
+  Star,
+  Palette,
+  RotateCcw
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -26,6 +30,7 @@ interface NavbarProps {
   onOpenAuth: (accountType?: 'customer' | 'admin') => void;
   onOpenAdminLogin: () => void;
   onOpenMyBookings: () => void;
+  onOpenRewards?: () => void;
   onOpenCustomerService?: () => void;
   onOpen3DViewer?: () => void;
   onOpenPlayAndEarn?: () => void;
@@ -49,6 +54,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAuth,
   onOpenAdminLogin,
   onOpenMyBookings,
+  onOpenRewards,
   onOpenCustomerService,
   onOpen3DViewer,
   onOpenPlayAndEarn,
@@ -58,14 +64,20 @@ export const Navbar: React.FC<NavbarProps> = ({
   onNavigate,
 }) => {
   const { currentUser, userProfile, isAdmin, loginWithGoogle, logout } = useAuth();
+  const { themeMeta, allThemes, activeTheme, setUserThemeOverride } = useFestivalTheme();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [accountDropdownOpen, setAccountDropdownOpen] = useState(false);
+  const [festivalMenuOpen, setFestivalMenuOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
+  const festivalMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setAccountDropdownOpen(false);
+      }
+      if (festivalMenuRef.current && !festivalMenuRef.current.contains(e.target as Node)) {
+        setFestivalMenuOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -76,23 +88,104 @@ export const Navbar: React.FC<NavbarProps> = ({
   const firstName = displayName.split(' ')[0];
   const avatarPhoto = currentUser?.photoURL || userProfile?.photoURL;
 
+  const headerBg = themeMeta.palette?.headerBg || '#451A03';
+  const buttonBg = themeMeta.palette?.buttonBg || '#B45309';
+
   return (
-    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-amber-900/10 shadow-xs">
-      {/* Topmost Executive Strip with Dedicated Customer & Admin Google Sign-In Controls */}
-      <div className="bg-amber-950 text-stone-200 text-[11px] py-1.5 px-4 sm:px-6 lg:px-8 border-b border-amber-900 flex items-center justify-between gap-2">
+    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-stone-200/80 shadow-xs transition-colors duration-300">
+      {/* Topmost Executive Strip with Dynamic Festival Color, Theme Switcher & Auth Controls */}
+      <div
+        className="text-stone-100 text-[11px] py-1.5 px-4 sm:px-6 lg:px-8 border-b border-white/10 flex items-center justify-between gap-2 transition-colors duration-300"
+        style={{ backgroundColor: headerBg }}
+      >
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-amber-400 font-bold truncate">Devashish Sunlit Homestay</span>
-          <span className="text-stone-400 hidden sm:inline truncate">· Tapovan, Rishikesh, Uttarakhand, India</span>
+          <span className="font-bold truncate" style={{ color: themeMeta.accentColor }}>
+            Devashish Sunlit Homestay
+          </span>
+          <span className="text-white/70 hidden sm:inline truncate">· Tapovan, Rishikesh, Uttarakhand, India</span>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          <span className="text-stone-300 hidden lg:inline">Direct Desk: +91 9897335265</span>
+        <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+          {/* Interactive 15-Theme Festival Switcher */}
+          <div className="relative" ref={festivalMenuRef}>
+            <button
+              type="button"
+              onClick={() => setFestivalMenuOpen((prev) => !prev)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-white/12 hover:bg-white/22 text-white font-semibold rounded text-[11px] border border-white/20 transition-colors cursor-pointer whitespace-nowrap"
+              title="Switch Sunlit Festival Magic Theme (15 Worlds)"
+            >
+              <Palette className="w-3 h-3" style={{ color: themeMeta.accentColor }} />
+              <span className="hidden md:inline max-w-[130px] truncate">{themeMeta.name.split('—')[0].trim()}</span>
+              <span className="md:hidden">Themes</span>
+              <ChevronDown className="w-3 h-3 opacity-80" />
+            </button>
+
+            {festivalMenuOpen && (
+              <div className="absolute right-0 mt-2 w-72 sm:w-80 bg-stone-950 text-white rounded-2xl border border-white/15 shadow-2xl overflow-hidden z-50 animate-slideDown">
+                <div className="px-3.5 py-2.5 border-b border-white/10 flex items-center justify-between bg-white/5">
+                  <div>
+                    <p className="text-xs font-extrabold text-amber-300 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Sunlit Festival Magic (15 Worlds)</span>
+                    </p>
+                    <p className="text-[10px] text-stone-400">Preview real Canvas &amp; Dashboard themes live</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUserThemeOverride(null);
+                      setFestivalMenuOpen(false);
+                    }}
+                    className="text-[10px] text-amber-300 hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Auto
+                  </button>
+                </div>
+                <div className="max-h-72 overflow-y-auto p-1.5 grid grid-cols-1 gap-1">
+                  {allThemes.map((t) => {
+                    const isSelected = activeTheme === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => {
+                          setUserThemeOverride(t.id);
+                          setFestivalMenuOpen(false);
+                        }}
+                        className={`w-full px-2.5 py-2 rounded-xl text-left flex items-center justify-between gap-2 transition cursor-pointer ${
+                          isSelected ? 'bg-white/15 ring-1 ring-amber-400/60' : 'hover:bg-white/8'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span
+                            className="w-3.5 h-3.5 rounded-full shrink-0 ring-1 ring-white/40"
+                            style={{ backgroundColor: t.primaryColor }}
+                          />
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-bold text-white truncate">{t.name}</p>
+                            <p className="text-[10px] text-stone-400 truncate">{t.badge}</p>
+                          </div>
+                        </div>
+                        {isSelected && (
+                          <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 shrink-0">
+                            Active
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <span className="text-stone-300 hidden xl:inline">Direct Desk: +91 9897335265</span>
 
           {!currentUser && (
             <button
               type="button"
               onClick={() => onOpenAuth('customer')}
-              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-white/10 hover:bg-white/20 text-white font-semibold rounded text-[11px] border border-white/15 transition-colors cursor-pointer"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-white/10 hover:bg-white/20 text-white font-semibold rounded text-[11px] border border-white/15 transition-colors cursor-pointer whitespace-nowrap"
               title="Customer Google Login"
             >
               <MiniGoogleIcon />
@@ -104,17 +197,18 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             type="button"
             onClick={onOpenAdminLogin}
-            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-amber-800 hover:bg-amber-700 text-amber-100 hover:text-white font-bold rounded text-[11px] border border-amber-600 transition-colors cursor-pointer shadow-xs"
+            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 text-white font-bold rounded text-[11px] border border-white/25 transition-opacity hover:opacity-90 cursor-pointer shadow-xs whitespace-nowrap"
+            style={{ backgroundColor: buttonBg }}
             title="Admin & Owner Google Portal Access"
           >
-            <Lock className="w-3 h-3 text-amber-300" />
+            <Lock className="w-3 h-3" />
             <span>{isAdmin ? 'ADMIN CORNER' : 'ADMIN LOGIN'}</span>
           </button>
         </div>
       </div>
 
       {/* Main Navigation Bar */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between gap-4">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between gap-3">
         {/* Brand wordmark */}
         <button
           onClick={() => {
@@ -123,14 +217,17 @@ export const Navbar: React.FC<NavbarProps> = ({
           }}
           className="flex items-center gap-2.5 text-left cursor-pointer group whitespace-nowrap shrink-0"
         >
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-950 via-amber-800 to-amber-600 flex items-center justify-center text-amber-200 shadow-xs border border-amber-500/40 group-hover:scale-105 transition-transform">
-            <Sparkles className="w-4 h-4 text-amber-300" />
+          <div
+            className="w-9 h-9 rounded-xl flex items-center justify-center text-white shadow-xs border border-white/20 group-hover:scale-105 transition-transform"
+            style={{ background: `linear-gradient(135deg, ${headerBg}, ${themeMeta.primaryColor})` }}
+          >
+            <Sparkles className="w-4 h-4 text-amber-200" />
           </div>
           <div>
-            <span className="text-sm sm:text-base font-black tracking-tight text-amber-950 group-hover:text-amber-800 transition-colors block leading-tight font-serif">
+            <span className="text-sm sm:text-base font-black tracking-tight text-stone-950 group-hover:opacity-80 transition-opacity block leading-tight font-serif">
               DEVASHISH SUNLIT
             </span>
-            <span className="block text-[10px] font-bold text-amber-800/90 tracking-widest uppercase">
+            <span className="block text-[10px] font-bold tracking-widest uppercase" style={{ color: themeMeta.secondaryColor }}>
               Home Stay · Tapovan, Rishikesh
             </span>
           </div>
@@ -237,7 +334,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => onNavigate('dining')}
-            className={`hover:text-amber-800 transition-colors cursor-pointer flex items-center gap-1 ${
+            className={`hover:text-amber-800 transition-colors cursor-pointer flex items-center gap-1 whitespace-nowrap ${
               activeSection === 'dining' ? 'text-amber-800 font-bold border-b-2 border-amber-600 pb-0.5' : ''
             }`}
             title="CookNow In-Room Satvik Dining"
@@ -247,19 +344,29 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              if (onOpenCustomerService) onOpenCustomerService();
-              else onNavigate('services');
-            }}
-            className="hover:text-amber-800 transition-colors cursor-pointer text-stone-700"
+            onClick={() => onNavigate('reviews')}
+            className={`hover:text-amber-800 transition-colors cursor-pointer flex items-center gap-1 whitespace-nowrap ${
+              activeSection === 'reviews' ? 'text-amber-800 font-bold border-b-2 border-amber-600 pb-0.5' : ''
+            }`}
           >
-            Services
+            <Star className="w-3.5 h-3.5 text-amber-600" />
+            <span>Reviews</span>
           </button>
+
+          {onOpenRewards && (
+            <button
+              onClick={onOpenRewards}
+              className="hover:text-amber-800 transition-colors cursor-pointer flex items-center gap-1 text-amber-900 font-bold whitespace-nowrap"
+            >
+              <Award className="w-3.5 h-3.5 text-amber-700" />
+              <span>Rewards</span>
+            </button>
+          )}
 
           {onOpenSupportChat && (
             <button
               onClick={onOpenSupportChat}
-              className="px-2.5 py-1 bg-amber-500/15 hover:bg-amber-500/25 text-amber-900 border border-amber-500/40 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
+              className="px-2.5 py-1 bg-amber-500/15 hover:bg-amber-500/25 text-amber-900 border border-amber-500/40 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs whitespace-nowrap"
             >
               <span>Message Desk</span>
             </button>
@@ -339,6 +446,20 @@ export const Navbar: React.FC<NavbarProps> = ({
 
                   {/* Quick Actions */}
                   <div className="p-2 space-y-1 text-xs">
+                    {onOpenRewards && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAccountDropdownOpen(false);
+                          onOpenRewards();
+                        }}
+                        className="w-full px-3 py-2 text-left rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-950 font-bold flex items-center gap-2.5 cursor-pointer border border-amber-200/70"
+                      >
+                        <Award className="w-4 h-4 text-amber-700" />
+                        <span>User Profile &amp; Sunlit Rewards</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => {
@@ -360,8 +481,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                         }}
                         className="w-full px-3 py-2 text-left rounded-xl hover:bg-stone-100 text-stone-800 font-semibold flex items-center gap-2.5 cursor-pointer"
                       >
-                        <Award className="w-4 h-4 text-amber-700" />
-                        <span>Play &amp; Earn Rewards</span>
+                        <Sparkles className="w-4 h-4 text-amber-700" />
+                        <span>Play &amp; Earn Arcade</span>
                       </button>
                     )}
 
@@ -446,7 +567,8 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={onOpenBooking}
-            className="px-3.5 py-1.5 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 shadow-sm rounded-xl transition-colors cursor-pointer whitespace-nowrap"
+            className="px-3.5 py-1.5 text-xs font-bold text-white shadow-sm rounded-xl transition-opacity hover:opacity-90 cursor-pointer whitespace-nowrap"
+            style={{ backgroundColor: buttonBg }}
           >
             Book Now
           </button>
@@ -607,6 +729,28 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Utensils className="w-3.5 h-3.5 text-amber-700" />
               <span>Dining &amp; CookNow</span>
             </button>
+            <button
+              onClick={() => {
+                onNavigate('reviews');
+                setMobileMenuOpen(false);
+              }}
+              className="text-left py-1.5 hover:text-amber-800 cursor-pointer flex items-center gap-1.5 font-bold text-stone-900"
+            >
+              <Star className="w-3.5 h-3.5 text-amber-600" />
+              <span>Guest Reviews</span>
+            </button>
+            {onOpenRewards && (
+              <button
+                onClick={() => {
+                  onOpenRewards();
+                  setMobileMenuOpen(false);
+                }}
+                className="text-left py-1.5 text-amber-900 font-bold cursor-pointer flex items-center gap-1.5"
+              >
+                <Award className="w-3.5 h-3.5 text-amber-700" />
+                <span>Sunlit Rewards Profile</span>
+              </button>
+            )}
             <button
               onClick={() => {
                 if (onOpenCustomerService) onOpenCustomerService();

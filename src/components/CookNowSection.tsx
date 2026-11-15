@@ -621,7 +621,7 @@ export const CookNowSection: React.FC = () => {
           ))}
         </div>
 
-        {/* Catalog Food Cards Grid */}
+        {/* Catalog Food Cards Grid — Blinkit / Zomato Merchandising Precision */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredCatalog.map((product) => {
             const inCart = cart.find((item) => item.product.id === product.id);
@@ -629,9 +629,9 @@ export const CookNowSection: React.FC = () => {
             return (
               <div
                 key={product.id}
-                className="group flex flex-col justify-between rounded-3xl border border-slate-800 bg-slate-900/80 overflow-hidden hover:border-amber-500/50 transition duration-300 shadow-lg hover:shadow-amber-500/5"
+                className="group flex flex-col justify-between rounded-3xl border border-slate-800 bg-slate-900/90 overflow-hidden hover:border-amber-500/60 transition-all duration-300 shadow-lg hover:shadow-amber-500/10"
               >
-                {/* Photo Header */}
+                {/* Clean Uncluttered 16:10 Dish Photo */}
                 <div className="relative aspect-[16/10] overflow-hidden bg-slate-800">
                   <SmoothImage
                     src={product.image}
@@ -640,85 +640,98 @@ export const CookNowSection: React.FC = () => {
                     wrapperClassName="h-full w-full"
                     className="h-full w-full object-cover group-hover:scale-105 transition duration-500"
                   />
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-black/30" />
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/15 to-transparent" />
 
-                  {/* Veg / Special Badges */}
-                  <div className="absolute top-3 left-3 flex items-center gap-2">
-                    <span className="flex items-center gap-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-bold text-emerald-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                      100% PURE VEG
+                  {/* Minimal Floating Delivery ETA Pill */}
+                  <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-sm rounded-lg px-2.5 py-1 text-[11px] font-bold text-white border border-white/15">
+                    <Clock className="h-3 w-3 text-emerald-400" />
+                    <span className="tabular-nums">{product.preparationMinutes} MINS</span>
+                  </div>
+
+                  {product.isChefSpecial && (
+                    <span className="absolute top-3 right-3 rounded-lg bg-amber-400 text-slate-950 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider shadow-md">
+                      Chef Special
                     </span>
-                    {product.isChefSpecial && (
-                      <span className="rounded-full bg-amber-500/90 text-slate-950 px-2 py-0.5 text-[10px] font-bold">
-                        CHEF SPECIAL
+                  )}
+
+                  {/* FSSAI Veg Indicator + Bestseller tag */}
+                  <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 bg-black/65 backdrop-blur-xs px-2 py-1 rounded-md border border-white/10">
+                      <span className="w-3.5 h-3.5 rounded-[3px] border-2 border-emerald-500 flex items-center justify-center bg-white">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
                       </span>
-                    )}
-                  </div>
-
-                  <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm rounded-full px-2.5 py-1 text-[11px] font-bold text-white border border-white/10">
-                    <Clock className="h-3 w-3 text-amber-400" />
-                    <span>~{product.preparationMinutes}m</span>
-                  </div>
-
-                  {/* Price Tag Over Bottom of Photo */}
-                  <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between">
-                    <div>
-                      {product.hindiName && (
-                        <span className="text-xs text-amber-300 font-medium block">
-                          {product.hindiName}
-                        </span>
-                      )}
-                      <h4 className="text-base font-bold text-white leading-snug drop-shadow-md">
-                        {product.name}
-                      </h4>
-                    </div>
-                    <span className="text-lg font-black text-amber-400 shrink-0 drop-shadow-md">
-                      ₹{product.price}
+                      <span className="text-[10px] font-extrabold text-emerald-300 uppercase tracking-wide">
+                        Pure Veg · {product.category}
+                      </span>
+                    </span>
+                    <span className="inline-flex items-center gap-1 bg-emerald-600 text-white text-[10px] font-black px-2 py-0.5 rounded-md tabular-nums shadow-xs">
+                      4.9 ★
                     </span>
                   </div>
                 </div>
 
-                {/* Body */}
+                {/* Merchandising Body */}
                 <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
-                  <p className="text-xs text-slate-300 leading-relaxed line-clamp-2">
-                    {product.description}
-                  </p>
+                  <div className="space-y-1.5">
+                    {product.hindiName && (
+                      <span className="text-[11px] text-amber-400 font-semibold block">
+                        {product.hindiName}
+                      </span>
+                    )}
+                    <h4 className="text-base font-extrabold text-white leading-snug line-clamp-1">
+                      {product.name}
+                    </h4>
+                    <p className="text-xs text-slate-300 leading-relaxed line-clamp-2">
+                      {product.description}
+                    </p>
+                  </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                    <span className="rounded-lg bg-slate-800 px-2 py-0.5 text-slate-400 font-medium">
+                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className="rounded-md bg-slate-800/90 px-2 py-0.5 text-slate-300 font-medium border border-slate-700/70">
                       Spice: <strong className={product.spiceLevel === 'Spicy' ? 'text-rose-400' : 'text-amber-300'}>{product.spiceLevel}</strong>
                     </span>
                     {product.calories && (
-                      <span className="rounded-lg bg-slate-800 px-2 py-0.5 text-slate-400">
+                      <span className="rounded-md bg-slate-800/90 px-2 py-0.5 text-slate-400 tabular-nums border border-slate-700/70">
                         {product.calories} kcal
                       </span>
                     )}
                     <button
                       type="button"
                       onClick={() => setSelectedProduct(product)}
-                      className="ml-auto text-amber-400 hover:text-amber-300 font-semibold inline-flex items-center gap-1 text-[11px]"
+                      className="ml-auto text-amber-400 hover:text-amber-300 font-semibold inline-flex items-center gap-1 text-[11px] cursor-pointer"
                     >
                       <Eye className="h-3 w-3" />
-                      View Ingredients
+                      <span>Ingredients</span>
                     </button>
                   </div>
 
-                  {/* Actions */}
-                  <div className="pt-2 border-t border-slate-800 flex items-center gap-2">
+                  {/* Blinkit / Zomato Price + ADD / Stepper Footer */}
+                  <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-3">
+                    <div>
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold block">
+                        Homestay Price
+                      </span>
+                      <span className="text-xl font-black text-white tabular-nums">
+                        ₹{product.price}
+                      </span>
+                    </div>
+
                     {inCart ? (
-                      <div className="flex-1 flex items-center justify-between rounded-xl bg-amber-500/20 border border-amber-500/40 p-1">
+                      <div className="inline-flex items-center rounded-xl bg-emerald-600 text-white shadow-md shadow-emerald-600/20 overflow-hidden">
                         <button
                           onClick={() => updateQuantity(product.id, -1)}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-800 text-white font-bold hover:bg-slate-700"
+                          className="h-9 w-9 flex items-center justify-center hover:bg-emerald-700 transition cursor-pointer"
+                          aria-label="Remove one"
                         >
                           <Minus className="h-3.5 w-3.5" />
                         </button>
-                        <span className="font-bold text-sm text-amber-300">
-                          {inCart.quantity} in Cart
+                        <span className="px-2.5 text-xs font-black tabular-nums">
+                          {inCart.quantity}
                         </span>
                         <button
                           onClick={() => updateQuantity(product.id, 1)}
-                          className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500 text-slate-950 font-bold hover:bg-amber-400"
+                          className="h-9 w-9 flex items-center justify-center hover:bg-emerald-700 transition cursor-pointer"
+                          aria-label="Add one more"
                         >
                           <Plus className="h-3.5 w-3.5" />
                         </button>
@@ -726,10 +739,10 @@ export const CookNowSection: React.FC = () => {
                     ) : (
                       <button
                         onClick={() => addToCart(product)}
-                        className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-slate-800 hover:bg-amber-500 hover:text-slate-950 py-2.5 text-xs font-bold text-white transition border border-slate-700"
+                        className="px-5 py-2 rounded-xl bg-white hover:bg-amber-400 text-slate-950 text-xs font-black tracking-wide transition shadow-md cursor-pointer inline-flex items-center gap-1.5"
                       >
-                        <ShoppingBag className="h-3.5 w-3.5" />
-                        <span>Add to Order</span>
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>ADD</span>
                       </button>
                     )}
                   </div>
@@ -739,18 +752,21 @@ export const CookNowSection: React.FC = () => {
           })}
         </div>
 
-        {/* Floating Cart Button */}
+        {/* Floating Blinkit-Style Cart Pill (bottom-left so it never overlaps AI/Admin FABs) */}
         {totalItemsCount > 0 && (
-          <div className="fixed bottom-6 right-6 z-40">
+          <div className="fixed bottom-20 md:bottom-6 left-4 sm:left-6 z-40">
             <button
               onClick={() => setIsCartOpen(true)}
-              className="flex items-center gap-3 rounded-full bg-gradient-to-r from-amber-500 to-amber-600 px-6 py-3.5 font-bold text-slate-950 shadow-2xl shadow-amber-500/30 hover:scale-105 transition"
+              className="flex items-center gap-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 px-5 py-3 font-extrabold text-white shadow-2xl shadow-emerald-950/50 border border-emerald-400/40 hover:scale-[1.02] transition cursor-pointer"
             >
-              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-950 text-amber-400 text-xs font-black">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white text-emerald-700 text-xs font-black tabular-nums">
                 {totalItemsCount}
               </div>
-              <span>View Cart (₹{totalAmount})</span>
-              <ChevronRight className="h-4 w-4" />
+              <div className="text-left leading-tight">
+                <span className="block text-[10px] text-emerald-100 uppercase font-bold">In-Room Kitchen Bag</span>
+                <span className="text-xs font-black tabular-nums">View Cart · ₹{totalAmount}</span>
+              </div>
+              <ChevronRight className="h-4 w-4 ml-1" />
             </button>
           </div>
         )}

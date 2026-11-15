@@ -15,10 +15,18 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function hasVerifiedEmail() {
+      return isSignedIn() &&
+        request.auth.token.email is string &&
+        request.auth.token.email_verified == true;
+    }
+
     function isAdmin() {
       return isSignedIn() && (
-        request.auth.token.email == 'subhpan8449@gmail.com' ||
-        request.auth.token.email.matches('.*@devashish\\.in$') ||
+        (hasVerifiedEmail() && (
+          request.auth.token.email == 'subhpan8449@gmail.com' ||
+          request.auth.token.email.matches('.*@devashish\\.in$')
+        )) ||
         exists(/databases/$(database)/documents/adminRoles/$(request.auth.uid))
       );
     }
@@ -27,12 +35,119 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidDateStr(val) {
+      return val is string && val.size() == 10 && val.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isValidCustomerBookingCreate() {
+      return isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.roomId is string &&
+        request.resource.data.roomId.size() > 0 &&
+        request.resource.data.roomId.size() <= 128 &&
+        exists(/databases/$(database)/documents/rooms/$(request.resource.data.roomId)) &&
+        request.resource.data.bookingReference is string &&
+        request.resource.data.bookingReference.size() >= 5 &&
+        request.resource.data.bookingReference.size() <= 64 &&
+        isValidDateStr(request.resource.data.checkInDate) &&
+        isValidDateStr(request.resource.data.checkOutDate) &&
+        request.resource.data.checkInDate < request.resource.data.checkOutDate &&
+        request.resource.data.nights is number &&
+        request.resource.data.nights >= 1 &&
+        request.resource.data.nights <= 365 &&
+        request.resource.data.adults is number &&
+        request.resource.data.adults >= 1 &&
+        request.resource.data.adults <= 20 &&
+        request.resource.data.roomSubtotal is number &&
+        request.resource.data.roomSubtotal >= 0 &&
+        request.resource.data.totalAmount is number &&
+        request.resource.data.totalAmount >= 0 &&
+        request.resource.data.totalAmount <= request.resource.data.roomSubtotal &&
+        (
+          (
+            request.resource.data.status in ['pending', 'held'] &&
+            request.resource.data.paymentStatus in ['pay_at_property', 'pending'] &&
+            (!('paymentVerified' in request.resource.data) || request.resource.data.paymentVerified == false)
+          ) ||
+          (
+            request.resource.data.status == 'confirmed' &&
+            request.resource.data.paymentStatus == 'paid' &&
+            request.resource.data.paymentVerified == true &&
+            request.resource.data.razorpayPaymentId is string &&
+            request.resource.data.razorpayPaymentId.size() > 5
+          )
+        );
+    }
+
+    function isValidCustomerCancellationOrArrivalUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'status',
+        'cancellationReason',
+        'cancellationRequestedAt',
+        'bookingHistory',
+        'arrivalStatus',
+        'arrivalNote',
+        'arrivalReportedAt',
+        'checkoutRequested',
+        'checkoutRequestedAt',
+        'customerRequests',
+        'updatedAt'
+      ]) &&
+      (
+        request.resource.data.status == resource.data.status ||
+        (
+          resource.data.status in ['pending', 'pending_approval', 'confirmed', 'awaiting_customer_confirmation'] &&
+          request.resource.data.status == 'cancellation_requested'
+        )
+      );
+    }
+
+    function isValidCustomerProposalResponse() {
+      return resource.data.status == 'awaiting_customer_confirmation' &&
+        'proposedChanges' in resource.data &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'roomId',
+          'roomName',
+          'roomCategory',
+          'checkInDate',
+          'checkOutDate',
+          'totalAmount',
+          'status',
+          'proposedChanges',
+          'bookingHistory',
+          'updatedAt'
+        ]) &&
+        (
+          (
+            request.resource.data.status == 'confirmed' &&
+            request.resource.data.proposedChanges.status == 'accepted' &&
+            request.resource.data.roomId == resource.data.proposedChanges.roomId &&
+            request.resource.data.checkInDate == resource.data.proposedChanges.checkInDate &&
+            request.resource.data.checkOutDate == resource.data.proposedChanges.checkOutDate &&
+            request.resource.data.totalAmount == resource.data.proposedChanges.totalAmount
+          ) ||
+          (
+            request.resource.data.status == 'pending' &&
+            request.resource.data.proposedChanges.status == 'declined' &&
+            request.resource.data.roomId == resource.data.roomId &&
+            request.resource.data.checkInDate == resource.data.checkInDate &&
+            request.resource.data.checkOutDate == resource.data.checkOutDate &&
+            request.resource.data.totalAmount == resource.data.totalAmount
+          )
+        );
+    }
+
     // Users collection
     match /users/{userId} {
       allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
       allow list: if isAdmin();
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      allow update: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow create: if isSignedIn() && request.auth.uid == userId &&
+                    (isAdmin() || !('role' in request.resource.data) || request.resource.data.role == 'guest');
+      allow update: if isAdmin() || (
+                    isSignedIn() && request.auth.uid == userId &&
+                    request.resource.data.uid == resource.data.uid &&
+                    (!('role' in request.resource.data) || request.resource.data.role == resource.data.role || request.resource.data.role == 'guest')
+      );
       allow delete: if isAdmin();
     }
 
@@ -61,44 +176,70 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
-    // Bookings collection
+    // Bookings collection (private PII, strict customer & admin boundary)
     match /bookings/{bookingId} {
       allow get: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
       allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
-      allow create: if isSignedIn() && 
-                    request.resource.data.userId == request.auth.uid &&
-                    request.resource.data.status in ['pending', 'pending_approval', 'awaiting_approval', 'confirmed'];
-      allow update: if isAdmin() || (
-        isSignedIn() && 
-        resource.data.userId == request.auth.uid && 
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'status', 
-          'cancellationReason', 
-          'cancellationRequestedAt',
-          'arrivalStatus', 
-          'arrivalNote', 
-          'arrivalReportedAt',
-          'checkoutRequested', 
-          'checkoutRequestedAt',
-          'customerRequests', 
-          'proposedChanges',
-          'updatedAt'
-        ])
+      allow create: if isValidId(bookingId) && (isAdmin() || isValidCustomerBookingCreate());
+      allow update: if isValidId(bookingId) && (
+        isAdmin() || (
+          isSignedIn() &&
+          resource.data.userId == request.auth.uid &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.bookingReference == resource.data.bookingReference &&
+          request.resource.data.paymentStatus == resource.data.paymentStatus &&
+          (!('paymentVerified' in resource.data)
+            ? (!('paymentVerified' in request.resource.data) || request.resource.data.paymentVerified == false)
+            : request.resource.data.paymentVerified == resource.data.paymentVerified) &&
+          (isValidCustomerCancellationOrArrivalUpdate() || isValidCustomerProposalResponse())
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // PII-free room availability locks (used by atomic Firestore transactions)
+    match /roomLocks/{roomId} {
+      allow get, list: if true;
+      allow create, update: if isAdmin() || (
+        isSignedIn() &&
+        isValidId(roomId) &&
+        request.resource.data.roomId == roomId &&
+        request.resource.data.slots is list &&
+        request.resource.data.slots.size() <= 200
       );
       allow delete: if isAdmin();
     }
 
     // Booking Status History (append-only timeline)
     match /bookingStatusHistory/{historyId} {
-      allow read: if isAdmin() || isSignedIn();
-      allow create: if isSignedIn() || isAdmin();
+      allow read: if isAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/bookings/$(resource.data.bookingId)) && get(/databases/$(database)/documents/bookings/$(resource.data.bookingId)).data.userId == request.auth.uid);
+      allow create: if isAdmin() || (isSignedIn() && request.resource.data.bookingId is string);
       allow update, delete: if false;
     }
 
-    // Inventory temporary holds during checkout
+    // Inventory temporary holds during checkout (owner/admin restricted)
     match /inventoryHolds/{holdId} {
-      allow read: if true;
-      allow create, update, delete: if true;
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(holdId) && isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.roomId is string &&
+        request.resource.data.roomId.size() > 0 &&
+        request.resource.data.roomId.size() <= 128 &&
+        isValidDateStr(request.resource.data.checkInDate) &&
+        isValidDateStr(request.resource.data.checkOutDate) &&
+        request.resource.data.checkInDate < request.resource.data.checkOutDate &&
+        request.resource.data.status == 'held' &&
+        request.resource.data.expiresAtMs is int;
+      allow update: if isValidId(holdId) && (
+        isAdmin() || (
+          isSignedIn() &&
+          resource.data.userId == request.auth.uid &&
+          request.resource.data.userId == resource.data.userId &&
+          request.resource.data.roomId == resource.data.roomId &&
+          request.resource.data.status in ['held', 'released', 'converted', 'expired']
+        )
+      );
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
 
     // Payment transactions
@@ -283,6 +424,13 @@ service cloud.firestore {
     match /contactEnquiries/{enquiryId} {
       allow create: if true;
       allow get, list, update, delete: if isAdmin();
+    }
+
+    // Sunlit Rewards Loyalty Transactions Ledger
+    match /loyaltyTransactions/{txId} {
+      allow get, list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+      allow update, delete: if isAdmin();
     }
   }
 }

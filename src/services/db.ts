@@ -13,13 +13,28 @@ import {
   serverTimestamp,
   runTransaction
 } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../firebase';
+import { awardPointsForBooking } from './loyaltyService';
+import {
+  HOLD_TTL_MS,
+  NON_BLOCKING_BOOKING_STATUSES,
+  buildRoomLockSlotsFromRecords,
+  calculateNights,
+  evaluateRoomAvailability,
+  isValidStatusTransition,
+  pruneExpiredHoldSlots,
+  validateBookingRequest,
+  type AvailabilityCheckResult,
+} from '../utils/bookingAvailability';
 import {
   Room,
   Facility,
   Offer,
   Booking,
   BookingStatus,
+  InventoryHold,
+  RoomLock,
+  RoomLockSlot,
   PlayAreaSettings,
   PlayAreaBooking,
   RooftopPackage,
@@ -47,6 +62,15 @@ import {
   GameRewardVoucher,
   GuestIdDocument
 } from '../types';
+
+export class BookingDomainError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'BookingDomainError';
+    this.code = code;
+  }
+}
 
 /**
  * Recursively removes undefined fields from an object so Firestore operations never throw:
@@ -767,20 +791,20 @@ export async function getRooms(): Promise<Room[]> {
 
 export async function addRoom(roomData: Omit<Room, 'id'>, adminEmail?: string): Promise<string> {
   try {
+    const cleanRoom = sanitizeForFirestore(roomData);
     const res = await addDoc(collection(db, 'rooms'), {
-      ...roomData,
+      ...cleanRoom,
       createdAt: new Date().toISOString()
     });
 
     if (adminEmail) {
-      await addDoc(collection(db, 'adminAuditLogs'), {
-        action: `Added room ${roomData.roomNumber} (${roomData.name})`,
-        performedBy: adminEmail,
-        targetCollection: 'rooms',
-        targetId: res.id,
-        details: roomData,
-        timestamp: new Date().toISOString()
-      });
+      await logAdminAudit(
+        `Added room ${roomData.roomNumber} (${roomData.name})`,
+        adminEmail,
+        'rooms',
+        res.id,
+        cleanRoom
+      );
     }
 
     return res.id;
@@ -791,21 +815,21 @@ export async function addRoom(roomData: Omit<Room, 'id'>, adminEmail?: string): 
 
 export async function updateRoom(roomId: string, data: Partial<Room>, adminEmail?: string): Promise<void> {
   try {
+    const cleanData = sanitizeForFirestore(data);
     const ref = doc(db, 'rooms', roomId);
     await updateDoc(ref, {
-      ...data,
+      ...cleanData,
       updatedAt: new Date().toISOString()
     });
 
     if (adminEmail) {
-      await addDoc(collection(db, 'adminAuditLogs'), {
-        action: `Updated room ${roomId}`,
-        performedBy: adminEmail,
-        targetCollection: 'rooms',
-        targetId: roomId,
-        details: data,
-        timestamp: new Date().toISOString()
-      });
+      await logAdminAudit(
+        `Updated room ${roomId}`,
+        adminEmail,
+        'rooms',
+        roomId,
+        cleanData
+      );
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `rooms/${roomId}`);
@@ -820,93 +844,505 @@ export async function deleteRoom(roomId: string): Promise<void> {
   }
 }
 
-// Check overlapping bookings
+// Internal helper to read active PII-free lock slots for a room
+async function getRoomLockSlots(roomId: string): Promise<RoomLockSlot[]> {
+  const nowMs = Date.now();
+  const slots: RoomLockSlot[] = [];
+  try {
+    const lockSnap = await getDoc(doc(db, 'roomLocks', roomId));
+    if (lockSnap.exists()) {
+      const data = lockSnap.data() as RoomLock;
+      if (Array.isArray(data.slots)) {
+        slots.push(...pruneExpiredHoldSlots(data.slots, nowMs));
+      }
+    }
+  } catch (err) {
+    console.warn('Could not read roomLocks document:', err);
+  }
+  return slots;
+}
+
+/**
+ * Checks room availability using PII-free roomLocks/{roomId}, rooms/{roomId},
+ * validation of past dates & same-day check-out turnover, and ignores expired holds & cancelled bookings.
+ */
+export async function checkRoomAvailabilityDetailed(
+  roomId: string,
+  checkIn: string,
+  checkOut: string,
+  options?: {
+    requestingUserId?: string | null;
+    adults?: number;
+    children?: number;
+    room?: Room | null;
+    excludeBookingId?: string;
+  }
+): Promise<AvailabilityCheckResult> {
+  try {
+    let targetRoom = options?.room || null;
+    if (!targetRoom) {
+      const roomSnap = await getDoc(doc(db, 'rooms', roomId));
+      if (roomSnap.exists()) {
+        targetRoom = { id: roomSnap.id, ...roomSnap.data() } as Room;
+      }
+    }
+
+    const slots = await getRoomLockSlots(roomId);
+    return evaluateRoomAvailability({
+      slots,
+      checkInDate: checkIn,
+      checkOutDate: checkOut,
+      requestingUserId: options?.requestingUserId ?? auth.currentUser?.uid ?? null,
+      room: targetRoom,
+      adults: options?.adults,
+      children: options?.children,
+      excludeBookingId: options?.excludeBookingId,
+      nowMs: Date.now(),
+    });
+  } catch (error) {
+    console.error('Error evaluating room availability:', error);
+    return {
+      available: false,
+      status: 'invalid_dates',
+      message: 'Unable to verify room availability right now. Please try again.',
+    };
+  }
+}
+
+// Backwards-compatible boolean availability helper
 export async function checkRoomAvailability(
   roomId: string,
   checkIn: string,
-  checkOut: string
+  checkOut: string,
+  requestingUserId?: string
 ): Promise<boolean> {
+  const result = await checkRoomAvailabilityDetailed(roomId, checkIn, checkOut, {
+    requestingUserId,
+  });
+  return result.available;
+}
+
+// ==========================================
+// INVENTORY HOLDS (PERSISTENT + TRANSACTIONAL)
+// ==========================================
+
+export async function acquireOrRefreshInventoryHold(params: {
+  roomId: string;
+  roomName?: string;
+  checkInDate: string;
+  checkOutDate: string;
+  adults?: number;
+  children?: number;
+  existingHoldId?: string | null;
+}): Promise<{ holdId: string; expiresAt: number; expiresInMinutes: number }> {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new BookingDomainError('unauthenticated', 'Please sign in with Google before holding or booking a room.');
+  }
+
   try {
-    const bookingsRef = collection(db, 'bookings');
-    const q = query(
-      bookingsRef,
-      where('roomId', '==', roomId)
-    );
-    const snap = await getDocs(q);
+    return await runTransaction(db, async (tx) => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const roomRef = doc(db, 'rooms', params.roomId);
+      const lockRef = doc(db, 'roomLocks', params.roomId);
 
-    const targetCheckIn = new Date(checkIn).getTime();
-    const targetCheckOut = new Date(checkOut).getTime();
+      const roomSnap = await tx.get(roomRef);
+      const lockSnap = await tx.get(lockRef);
 
-    for (const docSnap of snap.docs) {
-      const b = docSnap.data() as Booking;
-      // Skip cancelled or rejected
-      if (b.status === 'cancelled' || b.status === 'rejected') continue;
+      const room = roomSnap.exists() ? ({ id: roomSnap.id, ...roomSnap.data() } as Room) : null;
+      const existingSlots = lockSnap.exists() && Array.isArray((lockSnap.data() as RoomLock).slots)
+        ? (lockSnap.data() as RoomLock).slots
+        : [];
 
-      const existingIn = new Date(b.checkInDate).getTime();
-      const existingOut = new Date(b.checkOutDate).getTime();
+      const availability = evaluateRoomAvailability({
+        slots: existingSlots,
+        checkInDate: params.checkInDate,
+        checkOutDate: params.checkOutDate,
+        requestingUserId: user.uid,
+        room,
+        adults: params.adults,
+        children: params.children,
+        nowMs,
+      });
 
-      // Check overlap: targetCheckIn < existingOut && targetCheckOut > existingIn
-      if (targetCheckIn < existingOut && targetCheckOut > existingIn) {
-        return false; // Overlap detected
+      if (!availability.available) {
+        throw new BookingDomainError(availability.status, availability.message);
       }
-    }
-    return true;
+
+      // Clean expired holds and replace any previous hold by this same user on this room
+      const prunedSlots = pruneExpiredHoldSlots(existingSlots, nowMs).filter(
+        (s) => !(s.kind === 'hold' && s.userId === user.uid)
+      );
+
+      const holdId =
+        params.existingHoldId && /^[a-zA-Z0-9_-]{6,80}$/.test(params.existingHoldId)
+          ? params.existingHoldId
+          : `hold_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+      const expiresAtMs = nowMs + HOLD_TTL_MS;
+      const expiresAtIso = new Date(expiresAtMs).toISOString();
+
+      const newHoldSlot: RoomLockSlot = {
+        slotId: holdId,
+        kind: 'hold',
+        userId: user.uid,
+        checkInDate: params.checkInDate,
+        checkOutDate: params.checkOutDate,
+        status: 'held',
+        expiresAtMs,
+        updatedAt: nowIso,
+      };
+
+      const holdDocRef = doc(db, 'inventoryHolds', holdId);
+      const holdRecord: Record<string, any> = sanitizeForFirestore({
+        id: holdId,
+        holdId,
+        roomId: params.roomId,
+        roomName: params.roomName || room?.name || `Room ${params.roomId}`,
+        userId: user.uid,
+        guestEmail: user.email || '',
+        checkInDate: params.checkInDate,
+        checkOutDate: params.checkOutDate,
+        status: 'held',
+        expiresAtMs,
+        expiresAt: expiresAtIso,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      tx.set(holdDocRef, { ...holdRecord, serverCreatedAt: serverTimestamp() }, { merge: true });
+      tx.set(
+        lockRef,
+        {
+          roomId: params.roomId,
+          slots: [...prunedSlots, newHoldSlot],
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+
+      return {
+        holdId,
+        expiresAt: expiresAtMs,
+        expiresInMinutes: 15,
+      };
+    });
   } catch (error) {
-    // Graceful fallback if unauthenticated guest is previewing availability
-    console.warn('Booking availability check notice (expected for unauthenticated client queries):', error);
-    return true;
+    if (error instanceof BookingDomainError) throw error;
+    handleFirestoreError(error, OperationType.WRITE, `inventoryHolds/${params.roomId}`);
+  }
+}
+
+export async function releaseInventoryHoldRecord(
+  holdId: string,
+  roomIdHint?: string,
+  targetStatus: 'released' | 'expired' = 'released'
+): Promise<void> {
+  if (!holdId) return;
+  const user = auth.currentUser;
+  if (!user) return;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const holdRef = doc(db, 'inventoryHolds', holdId);
+      const holdSnap = await tx.get(holdRef);
+      const resolvedRoomId = roomIdHint || (holdSnap.exists() ? (holdSnap.data() as InventoryHold).roomId : undefined);
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+
+      if (resolvedRoomId) {
+        const lockRef = doc(db, 'roomLocks', resolvedRoomId);
+        const lockSnap = await tx.get(lockRef);
+        if (lockSnap.exists()) {
+          const existingSlots = Array.isArray((lockSnap.data() as RoomLock).slots)
+            ? (lockSnap.data() as RoomLock).slots
+            : [];
+          const nextSlots = pruneExpiredHoldSlots(existingSlots, nowMs).filter((s) => s.slotId !== holdId);
+          tx.set(lockRef, { roomId: resolvedRoomId, slots: nextSlots, updatedAt: nowIso }, { merge: true });
+        }
+      }
+
+      if (holdSnap.exists()) {
+        const currentHold = holdSnap.data() as InventoryHold;
+        if (currentHold.status === 'held') {
+          tx.update(holdRef, {
+            status: targetStatus,
+            releasedAt: nowIso,
+            releasedBy: user.email || user.uid,
+            updatedAt: nowIso,
+          });
+        }
+      }
+    });
+  } catch (error) {
+    console.warn('Non-blocking hold release notice:', error);
+  }
+}
+
+export async function getInventoryHolds(): Promise<InventoryHold[]> {
+  try {
+    const snap = await getDocs(collection(db, 'inventoryHolds'));
+    const holds = snap.docs.map((d) => ({ id: d.id, ...d.data() } as InventoryHold));
+    const nowMs = Date.now();
+    return holds
+      .map((h) => ({
+        ...h,
+        status: h.status === 'held' && h.expiresAtMs <= nowMs ? 'expired' : h.status,
+      }))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'inventoryHolds');
+  }
+}
+
+export async function releaseHoldByAdmin(holdId: string, adminEmail: string): Promise<void> {
+  try {
+    let resolvedRoomId = '';
+    await runTransaction(db, async (tx) => {
+      const holdRef = doc(db, 'inventoryHolds', holdId);
+      const holdSnap = await tx.get(holdRef);
+      if (!holdSnap.exists()) throw new BookingDomainError('not_found', 'Hold record not found.');
+      const hold = holdSnap.data() as InventoryHold;
+      resolvedRoomId = hold.roomId;
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+
+      if (hold.roomId) {
+        const lockRef = doc(db, 'roomLocks', hold.roomId);
+        const lockSnap = await tx.get(lockRef);
+        if (lockSnap.exists()) {
+          const existingSlots = Array.isArray((lockSnap.data() as RoomLock).slots)
+            ? (lockSnap.data() as RoomLock).slots
+            : [];
+          const nextSlots = pruneExpiredHoldSlots(existingSlots, nowMs).filter((s) => s.slotId !== holdId);
+          tx.set(lockRef, { roomId: hold.roomId, slots: nextSlots, updatedAt: nowIso }, { merge: true });
+        }
+      }
+
+      tx.update(holdRef, {
+        status: 'released',
+        releasedBy: adminEmail,
+        releasedAt: nowIso,
+        updatedAt: nowIso,
+      });
+    });
+
+    await logAdminAudit(
+      `Released inventory hold ${holdId}`,
+      adminEmail,
+      'inventoryHolds',
+      holdId,
+      { roomId: resolvedRoomId }
+    );
+  } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
+    handleFirestoreError(error, OperationType.UPDATE, `inventoryHolds/${holdId}`);
+  }
+}
+
+/**
+ * Reconciles roomLocks/{roomId} from existing Firestore bookings & unexpired holds.
+ * Preserves all existing bookings/holds while ensuring atomic roomLocks index stays accurate.
+ */
+export async function syncRoomLocksFromBookings(
+  bookings: Booking[],
+  holds: InventoryHold[] = []
+): Promise<void> {
+  try {
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const grouped = buildRoomLockSlotsFromRecords(bookings, holds, nowMs);
+    const roomIds = new Set<string>([...Object.keys(grouped), ...bookings.map((b) => b.roomId).filter(Boolean)]);
+
+    for (const rId of roomIds) {
+      const lockRef = doc(db, 'roomLocks', rId);
+      const targetSlots = grouped[rId] || [];
+      await setDoc(
+        lockRef,
+        {
+          roomId: rId,
+          slots: targetSlots,
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+    }
+  } catch (error) {
+    console.warn('Room lock reconciliation notice:', error);
   }
 }
 
 // ==========================================
-// BOOKINGS CRUD
+// BOOKINGS CRUD (ATOMIC TRANSACTIONAL)
 // ==========================================
 
 export async function createBooking(
   bookingData: Omit<Booking, 'id' | 'bookingReference' | 'status' | 'createdAt'> & { status?: BookingStatus }
 ): Promise<{ id: string; bookingReference: string }> {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new BookingDomainError('unauthenticated', 'Please sign in with Google to complete your reservation.');
+  }
+  if (bookingData.userId !== user.uid) {
+    throw new BookingDomainError('forbidden', 'Cannot create a booking on behalf of another user.');
+  }
+
   try {
-    // Generate human-friendly reference: DSH-YYYYMMDD-XXXX
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const dateCode = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const bookingReference = `DSH-${dateCode}-${randomSuffix}`;
+    const newBookingRef = doc(collection(db, 'bookings'));
 
-    // Verify room availability first
-    const isAvailable = await checkRoomAvailability(
-      bookingData.roomId,
-      bookingData.checkInDate,
-      bookingData.checkOutDate
-    );
+    const isPaidVerified =
+      bookingData.paymentStatus === 'paid' &&
+      bookingData.paymentVerified === true &&
+      Boolean(bookingData.razorpayPaymentId);
 
-    if (!isAvailable) {
-      throw new Error('This room is already booked for the selected dates. Please choose different dates or another room.');
-    }
+    // Enforce server/rule-aligned state discipline: customers only confirm directly on verified online payment
+    const initialStatus: BookingStatus = isPaidVerified ? 'confirmed' : 'pending';
 
-    const initialStatus = bookingData.status || (bookingData.paymentStatus === 'paid' ? 'confirmed' : 'pending');
+    await runTransaction(db, async (tx) => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
 
-    const payload: Omit<Booking, 'id'> = {
-      ...bookingData,
-      bookingReference,
-      status: initialStatus,
-      createdAt: new Date().toISOString()
-    };
+      const roomRef = doc(db, 'rooms', bookingData.roomId);
+      const lockRef = doc(db, 'roomLocks', bookingData.roomId);
+      const holdRef = bookingData.holdId ? doc(db, 'inventoryHolds', bookingData.holdId) : null;
 
-    const docRef = await addDoc(collection(db, 'bookings'), payload);
+      const roomSnap = await tx.get(roomRef);
+      const lockSnap = await tx.get(lockRef);
+      const holdSnap = holdRef ? await tx.get(holdRef) : null;
 
-    // Also add notification for user
-    await addDoc(collection(db, 'notifications'), {
-      recipientUid: bookingData.userId,
-      type: 'booking',
-      title: initialStatus === 'confirmed' ? 'Booking Confirmed (Paid)' : 'Booking Request Submitted',
-      message: initialStatus === 'confirmed'
-        ? `Your reservation ${bookingReference} for ${bookingData.roomName} is confirmed! Payment received.`
-        : `Your booking request ${bookingReference} for ${bookingData.roomName} has been received. Devashish Homestay team will confirm shortly.`,
-      isRead: false,
-      createdAt: new Date().toISOString()
+      const room = roomSnap.exists() ? ({ id: roomSnap.id, ...roomSnap.data() } as Room) : null;
+
+      // Validate explicit hold session if caller attached one
+      if (holdSnap && holdSnap.exists()) {
+        const holdData = holdSnap.data() as InventoryHold;
+        if (holdData.userId !== user.uid) {
+          throw new BookingDomainError('temporarily_held', 'Room is temporarily held by another guest.');
+        }
+        if (holdData.status === 'expired' || (holdData.status === 'held' && holdData.expiresAtMs <= nowMs)) {
+          tx.update(holdRef!, { status: 'expired', updatedAt: nowIso });
+          throw new BookingDomainError('session_expired', 'Your booking session has expired. Please re-select your room and dates.');
+        }
+        if (holdData.status === 'released' || holdData.status === 'converted') {
+          // Hold already closed — rely cleanly on real-time room lock check below
+        }
+      }
+
+      const existingSlots = lockSnap.exists() && Array.isArray((lockSnap.data() as RoomLock).slots)
+        ? (lockSnap.data() as RoomLock).slots
+        : [];
+
+      const availability = evaluateRoomAvailability({
+        slots: existingSlots,
+        checkInDate: bookingData.checkInDate,
+        checkOutDate: bookingData.checkOutDate,
+        requestingUserId: user.uid,
+        room,
+        adults: bookingData.adults,
+        children: bookingData.children,
+        nowMs,
+      });
+
+      if (!availability.available) {
+        if (availability.status === 'already_booked') {
+          throw new BookingDomainError(
+            'already_booked',
+            bookingData.holdId
+              ? 'Another guest has just booked this room.'
+              : 'Room is already booked.'
+          );
+        }
+        throw new BookingDomainError(availability.status, availability.message);
+      }
+
+      const canonicalNights = calculateNights(bookingData.checkInDate, bookingData.checkOutDate);
+      const safeRate = Math.max(0, Number(bookingData.basePricePerNight) || room?.specialPrice || room?.basePrice || 0);
+      const canonicalSubtotal = safeRate * canonicalNights;
+      const safeDiscount = Math.max(0, Math.min(canonicalSubtotal, Number(bookingData.discountApplied) || 0));
+      const canonicalTotal = Math.max(0, canonicalSubtotal - safeDiscount);
+
+      const initialHistory: BookingHistoryItem = {
+        id: `hist_${nowMs}`,
+        timestamp: nowIso,
+        action: initialStatus === 'confirmed' ? 'Booking Confirmed (Online Payment Verified)' : 'Booking Request Created',
+        performedBy: bookingData.guestEmail || user.email || user.uid,
+        note: initialStatus === 'confirmed' ? 'Confirmed via verified online payment.' : 'Awaiting host confirmation (Pay at Property).',
+      };
+
+      const payload = sanitizeForFirestore({
+        ...bookingData,
+        nights: canonicalNights,
+        basePricePerNight: safeRate,
+        roomSubtotal: canonicalSubtotal,
+        discountApplied: safeDiscount,
+        totalAmount: canonicalTotal,
+        bookingReference,
+        status: initialStatus,
+        bookingHistory: [initialHistory],
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      tx.set(newBookingRef, payload);
+
+      // Update PII-free room lock atomically: prune expired holds, remove this user's temporary holds, add new booking slot
+      const cleanedSlots = pruneExpiredHoldSlots(existingSlots, nowMs).filter(
+        (s) => !(s.kind === 'hold' && (s.userId === user.uid || (bookingData.holdId && s.slotId === bookingData.holdId)))
+      );
+
+      const newBookingSlot: RoomLockSlot = {
+        slotId: newBookingRef.id,
+        kind: 'booking',
+        userId: user.uid,
+        checkInDate: bookingData.checkInDate,
+        checkOutDate: bookingData.checkOutDate,
+        status: initialStatus,
+        updatedAt: nowIso,
+      };
+
+      tx.set(
+        lockRef,
+        {
+          roomId: bookingData.roomId,
+          slots: [...cleanedSlots, newBookingSlot],
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+
+      if (holdRef && holdSnap && holdSnap.exists() && (holdSnap.data() as InventoryHold).status === 'held') {
+        tx.update(holdRef, {
+          status: 'converted',
+          convertedBookingId: newBookingRef.id,
+          updatedAt: nowIso,
+        });
+      }
     });
 
-    return { id: docRef.id, bookingReference };
+    // Non-blocking notification creation after atomic booking commit
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        recipientUid: bookingData.userId,
+        type: 'booking',
+        title: initialStatus === 'confirmed' ? 'Booking Confirmed (Paid)' : 'Booking Request Submitted',
+        message:
+          initialStatus === 'confirmed'
+            ? `Your reservation ${bookingReference} for ${bookingData.roomName} is confirmed! Payment received.`
+            : `Your booking request ${bookingReference} for ${bookingData.roomName} has been received. Devashish Homestay team will confirm shortly.`,
+        bookingId: newBookingRef.id,
+        bookingReference,
+        isRead: false,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (notifErr) {
+      console.warn('Booking confirmation notification notice:', notifErr);
+    }
+
+    return { id: newBookingRef.id, bookingReference };
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.CREATE, 'bookings');
   }
 }
@@ -933,6 +1369,86 @@ export async function getUserBookings(userId: string): Promise<Booking[]> {
   }
 }
 
+// Helper for atomic booking status mutation + roomLocks/{roomId} synchronization
+async function mutateBookingAndSyncLock(params: {
+  bookingId: string;
+  targetStatus?: BookingStatus;
+  validateTransition?: boolean;
+  actionLabel: string;
+  performedBy: string;
+  note?: string;
+  buildUpdates: (current: Booking, nowIso: string) => Record<string, any>;
+}): Promise<{ booking: Booking; previousStatus: BookingStatus }> {
+  let capturedBooking!: Booking;
+  let previousStatus!: BookingStatus;
+
+  await runTransaction(db, async (tx) => {
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const bRef = doc(db, 'bookings', params.bookingId);
+    const bSnap = await tx.get(bRef);
+    if (!bSnap.exists()) {
+      throw new BookingDomainError('not_found', 'Booking not found.');
+    }
+
+    const data = { id: bSnap.id, ...bSnap.data() } as Booking;
+    previousStatus = data.status;
+
+    if (params.targetStatus && params.validateTransition !== false) {
+      if (!isValidStatusTransition(previousStatus, params.targetStatus)) {
+        throw new BookingDomainError(
+          'invalid_transition',
+          `Cannot change booking from "${previousStatus.replace(/_/g, ' ')}" to "${params.targetStatus.replace(/_/g, ' ')}".`
+        );
+      }
+    }
+
+    const historyItem: BookingHistoryItem = sanitizeForFirestore({
+      id: `hist_${nowMs}`,
+      timestamp: nowIso,
+      action: params.actionLabel,
+      performedBy: params.performedBy,
+      note: params.note || '',
+    });
+
+    const currentHistory = Array.isArray(data.bookingHistory) ? data.bookingHistory : [];
+    const customUpdates = sanitizeForFirestore(params.buildUpdates(data, nowIso));
+    const nextStatus = (customUpdates.status as BookingStatus) || data.status;
+
+    const mergedUpdates = sanitizeForFirestore({
+      ...customUpdates,
+      bookingHistory: [...currentHistory, historyItem],
+      updatedAt: nowIso,
+    });
+
+    const lockRef = doc(db, 'roomLocks', data.roomId);
+    const lockSnap = await tx.get(lockRef);
+    const existingSlots = lockSnap.exists() && Array.isArray((lockSnap.data() as RoomLock).slots)
+      ? (lockSnap.data() as RoomLock).slots
+      : [];
+    const filteredSlots = pruneExpiredHoldSlots(existingSlots, nowMs).filter((s) => s.slotId !== params.bookingId);
+
+    if (!NON_BLOCKING_BOOKING_STATUSES.has(nextStatus)) {
+      filteredSlots.push({
+        slotId: params.bookingId,
+        kind: 'booking',
+        userId: data.userId || '',
+        checkInDate: (customUpdates.checkInDate as string) || data.checkInDate,
+        checkOutDate: (customUpdates.checkOutDate as string) || data.checkOutDate,
+        status: nextStatus,
+        updatedAt: nowIso,
+      });
+    }
+
+    tx.update(bRef, mergedUpdates);
+    tx.set(lockRef, { roomId: data.roomId, slots: filteredSlots, updatedAt: nowIso }, { merge: true });
+
+    capturedBooking = { ...data, ...mergedUpdates };
+  });
+
+  return { booking: capturedBooking, previousStatus };
+}
+
 export async function updateBookingStatus(
   bookingId: string,
   newStatus: BookingStatus,
@@ -940,48 +1456,70 @@ export async function updateBookingStatus(
   note?: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const previousStatus = bSnap.data()?.status;
-    await updateDoc(bRef, {
-      status: newStatus,
-      updatedAt: new Date().toISOString()
+    const { booking: bData, previousStatus } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: newStatus,
+      actionLabel: `Status updated to ${newStatus}`,
+      performedBy: adminEmail,
+      note: note || '',
+      buildUpdates: () => ({ status: newStatus }),
     });
 
+    // Award Sunlit Rewards points on booking completion (completed or checked_out)
+    let newlyEarnedPoints = 0;
+    if (
+      (newStatus === 'completed' || newStatus === 'checked_out') &&
+      !bData?.loyaltyPointsAwarded &&
+      bData?.userId
+    ) {
+      newlyEarnedPoints = await awardPointsForBooking(
+        bData.userId,
+        Number(bData.totalAmount) || 0,
+        bData.bookingReference || bookingId
+      );
+      if (newlyEarnedPoints > 0) {
+        await updateDoc(doc(db, 'bookings', bookingId), {
+          loyaltyPointsAwarded: true,
+          loyaltyPointsEarned: newlyEarnedPoints,
+          loyaltyAwardedAt: new Date().toISOString()
+        });
+      }
+    }
+
     // Record history
-    await addDoc(collection(db, 'bookingStatusHistory'), {
+    await addDoc(collection(db, 'bookingStatusHistory'), sanitizeForFirestore({
       bookingId,
       previousStatus,
       newStatus,
       changedBy: adminEmail,
       note: note || '',
       timestamp: new Date().toISOString()
-    });
+    }));
 
-    // Record admin audit log safely without throwing on optional undefined note
     await logAdminAudit(
       `Booking status changed to ${newStatus}`,
       adminEmail,
       'bookings',
       bookingId,
-      { previousStatus, newStatus, note: note || '' }
+      { previousStatus, newStatus, note: note || '', loyaltyPointsAwarded: newlyEarnedPoints }
     );
 
-    // Notify guest
-    const guestUid = bSnap.data()?.userId;
-    if (guestUid) {
+    if (bData?.userId) {
       await addDoc(collection(db, 'notifications'), {
-        recipientUid: guestUid,
-        type: 'booking',
-        title: `Booking Status: ${newStatus.toUpperCase()}`,
-        message: `Your reservation ${bSnap.data()?.bookingReference} is now marked as ${newStatus}.`,
+        recipientUid: bData.userId,
+        type: newlyEarnedPoints > 0 ? 'loyalty' : 'booking',
+        title: newlyEarnedPoints > 0
+          ? `Stay Completed · +${newlyEarnedPoints} Sunlit Points!`
+          : `Booking Status: ${newStatus.toUpperCase()}`,
+        message: newlyEarnedPoints > 0
+          ? `Thank you for staying with Devashish Sunlit Homestay! ${newlyEarnedPoints} Sunlit Rewards points have been credited for ${bData?.bookingReference}.`
+          : `Your reservation ${bData?.bookingReference} is now marked as ${newStatus}.`,
         isRead: false,
         createdAt: new Date().toISOString()
       });
     }
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -992,29 +1530,15 @@ export async function approveBooking(
   note?: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const newStatus: BookingStatus = data.paymentStatus === 'paid' ? 'confirmed' : 'confirmed';
-
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      action: 'Approved by Administrator',
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'confirmed',
+      actionLabel: 'Approved by Administrator',
       performedBy: adminEmail,
-      note: note || 'Booking approved and dates locked in.'
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      status: newStatus,
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: new Date().toISOString()
+      note: note || 'Booking approved and dates locked in.',
+      buildUpdates: () => ({ status: 'confirmed' }),
     });
 
-    // Notify guest
     if (data.userId) {
       await addDoc(collection(db, 'notifications'), {
         recipientUid: data.userId,
@@ -1028,7 +1552,6 @@ export async function approveBooking(
       });
     }
 
-    // Audit log
     await logAdminAudit(
       `Approved booking ${data.bookingReference}`,
       adminEmail,
@@ -1037,6 +1560,7 @@ export async function approveBooking(
       { note: note || '' }
     );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1047,26 +1571,17 @@ export async function rejectBooking(
   reason: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      action: 'Booking Rejected',
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'rejected',
+      actionLabel: 'Booking Rejected',
       performedBy: adminEmail,
-      note: reason
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      status: 'rejected',
-      rejectionReason: reason,
-      rejectedAt: new Date().toISOString(),
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: new Date().toISOString()
+      note: reason || 'Declined by property administrator.',
+      buildUpdates: (_current, nowIso) => ({
+        status: 'rejected',
+        rejectionReason: reason,
+        rejectedAt: nowIso,
+      }),
     });
 
     if (data.userId) {
@@ -1090,6 +1605,53 @@ export async function rejectBooking(
       { reason: reason || '' }
     );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
+    handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
+  }
+}
+
+export async function cancelBookingByAdmin(
+  bookingId: string,
+  adminEmail: string,
+  reason?: string
+): Promise<void> {
+  try {
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'cancelled',
+      actionLabel: 'Cancelled by Administrator',
+      performedBy: adminEmail,
+      note: reason || 'Reservation cancelled and room inventory released.',
+      buildUpdates: (current, nowIso) => ({
+        status: 'cancelled',
+        cancellationReason: reason || 'Cancelled by host administrator.',
+        cancellationRequestedAt: current.cancellationRequestedAt || nowIso,
+        refundStatus: current.paymentStatus === 'paid' ? 'pending' : 'none',
+      }),
+    });
+
+    if (data.userId) {
+      await addDoc(collection(db, 'notifications'), {
+        recipientUid: data.userId,
+        type: 'cancellation',
+        title: 'Reservation Cancelled',
+        message: `Your reservation ${data.bookingReference} has been cancelled.${reason ? ` Note: ${reason}` : ''}`,
+        bookingId,
+        bookingReference: data.bookingReference,
+        isRead: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    await logAdminAudit(
+      `Cancelled booking ${data.bookingReference}`,
+      adminEmail,
+      'bookings',
+      bookingId,
+      { reason: reason || '' }
+    );
+  } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1100,25 +1662,17 @@ export async function proposeBookingChanges(
   proposal: ProposedBookingChanges
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      action: `Proposed change: Room ${proposal.roomName}, ${proposal.checkInDate} to ${proposal.checkOutDate}`,
+    const cleanProposal = sanitizeForFirestore(proposal);
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'awaiting_customer_confirmation',
+      actionLabel: `Proposed change: Room ${proposal.roomName}, ${proposal.checkInDate} to ${proposal.checkOutDate}`,
       performedBy: adminEmail,
-      note: proposal.reason
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      status: 'awaiting_customer_confirmation',
-      proposedChanges: proposal,
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: new Date().toISOString()
+      note: proposal.reason || '',
+      buildUpdates: () => ({
+        status: 'awaiting_customer_confirmation',
+        proposedChanges: cleanProposal,
+      }),
     });
 
     if (data.userId) {
@@ -1134,15 +1688,15 @@ export async function proposeBookingChanges(
       });
     }
 
-    await addDoc(collection(db, 'adminAuditLogs'), {
-      action: `Proposed room/date change for ${data.bookingReference}`,
-      performedBy: adminEmail,
-      targetCollection: 'bookings',
-      targetId: bookingId,
-      details: proposal,
-      timestamp: new Date().toISOString()
-    });
+    await logAdminAudit(
+      `Proposed room/date change for ${data.bookingReference}`,
+      adminEmail,
+      'bookings',
+      bookingId,
+      cleanProposal
+    );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1157,84 +1711,135 @@ export async function respondToProposedChanges(
   const userEmail = typeof arg3 === 'string' ? arg3 : (typeof arg2 === 'string' ? arg2 : 'guest');
 
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
+    let updatedData!: Booking;
 
-    const data = bSnap.data() as Booking;
-    const proposal = data.proposedChanges;
-    if (!proposal) throw new Error('No active proposed changes found');
+    await runTransaction(db, async (tx) => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const bRef = doc(db, 'bookings', bookingId);
+      const bSnap = await tx.get(bRef);
+      if (!bSnap.exists()) throw new BookingDomainError('not_found', 'Booking not found');
 
-    const currentHistory = data.bookingHistory || [];
+      const data = { id: bSnap.id, ...bSnap.data() } as Booking;
+      const proposal = data.proposedChanges;
+      if (!proposal) throw new BookingDomainError('not_found', 'No active proposed changes found');
 
-    if (accept) {
-      const historyItem: BookingHistoryItem = {
-        id: `hist_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        action: 'Customer Accepted Proposed Changes',
-        performedBy: userEmail,
-        note: 'Reservation updated with proposed room & dates.'
-      };
+      const currentHistory = Array.isArray(data.bookingHistory) ? data.bookingHistory : [];
 
-      await updateDoc(bRef, {
-        roomId: proposal.roomId,
-        roomName: proposal.roomName,
-        roomCategory: proposal.roomCategory,
-        checkInDate: proposal.checkInDate,
-        checkOutDate: proposal.checkOutDate,
-        totalAmount: proposal.totalAmount,
-        status: 'confirmed',
-        proposedChanges: {
-          ...proposal,
-          status: 'accepted'
-        },
-        bookingHistory: [...currentHistory, historyItem],
-        updatedAt: new Date().toISOString()
-      });
+      if (accept) {
+        const targetRoomRef = doc(db, 'rooms', proposal.roomId);
+        const targetLockRef = doc(db, 'roomLocks', proposal.roomId);
+        const oldLockRef = data.roomId !== proposal.roomId ? doc(db, 'roomLocks', data.roomId) : null;
 
-      // Notify admin
-      await addDoc(collection(db, 'notifications'), {
-        recipientUid: 'admin',
-        type: 'proposal',
-        title: 'Customer Accepted Proposed Change',
-        message: `Guest ${data.guestName} accepted proposed change for reservation ${data.bookingReference}.`,
-        bookingId,
-        bookingReference: data.bookingReference,
-        isRead: false,
-        createdAt: new Date().toISOString()
-      });
-    } else {
-      const historyItem: BookingHistoryItem = {
-        id: `hist_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        action: 'Customer Declined Proposed Changes',
-        performedBy: userEmail,
-        note: 'Kept original reservation request.'
-      };
+        const targetRoomSnap = await tx.get(targetRoomRef);
+        const targetLockSnap = await tx.get(targetLockRef);
+        const oldLockSnap = oldLockRef ? await tx.get(oldLockRef) : null;
 
-      await updateDoc(bRef, {
-        status: 'pending',
-        proposedChanges: {
-          ...proposal,
-          status: 'declined'
-        },
-        bookingHistory: [...currentHistory, historyItem],
-        updatedAt: new Date().toISOString()
-      });
+        const targetRoom = targetRoomSnap.exists() ? ({ id: targetRoomSnap.id, ...targetRoomSnap.data() } as Room) : null;
+        const targetSlots = targetLockSnap.exists() && Array.isArray((targetLockSnap.data() as RoomLock).slots)
+          ? (targetLockSnap.data() as RoomLock).slots
+          : [];
 
-      // Notify admin
-      await addDoc(collection(db, 'notifications'), {
-        recipientUid: 'admin',
-        type: 'proposal',
-        title: 'Customer Declined Proposed Change',
-        message: `Guest ${data.guestName} declined proposed change for reservation ${data.bookingReference}. Awaiting host review.`,
-        bookingId,
-        bookingReference: data.bookingReference,
-        isRead: false,
-        createdAt: new Date().toISOString()
-      });
-    }
+        const avail = evaluateRoomAvailability({
+          slots: targetSlots,
+          checkInDate: proposal.checkInDate,
+          checkOutDate: proposal.checkOutDate,
+          requestingUserId: data.userId,
+          room: targetRoom,
+          excludeBookingId: bookingId,
+          nowMs,
+        });
+
+        if (!avail.available) {
+          throw new BookingDomainError(avail.status, avail.message);
+        }
+
+        const historyItem: BookingHistoryItem = {
+          id: `hist_${nowMs}`,
+          timestamp: nowIso,
+          action: 'Customer Accepted Proposed Changes',
+          performedBy: userEmail,
+          note: 'Reservation updated with proposed room & dates.',
+        };
+
+        const updates = sanitizeForFirestore({
+          roomId: proposal.roomId,
+          roomName: proposal.roomName,
+          roomCategory: proposal.roomCategory,
+          checkInDate: proposal.checkInDate,
+          checkOutDate: proposal.checkOutDate,
+          totalAmount: proposal.totalAmount,
+          status: 'confirmed',
+          proposedChanges: { ...proposal, status: 'accepted' },
+          bookingHistory: [...currentHistory, historyItem],
+          updatedAt: nowIso,
+        });
+
+        tx.update(bRef, updates);
+
+        if (oldLockRef && oldLockSnap?.exists()) {
+          const oldSlots = Array.isArray((oldLockSnap.data() as RoomLock).slots)
+            ? (oldLockSnap.data() as RoomLock).slots
+            : [];
+          tx.set(
+            oldLockRef,
+            {
+              roomId: data.roomId,
+              slots: pruneExpiredHoldSlots(oldSlots, nowMs).filter((s) => s.slotId !== bookingId),
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
+        }
+
+        const nextTargetSlots = pruneExpiredHoldSlots(targetSlots, nowMs).filter((s) => s.slotId !== bookingId);
+        nextTargetSlots.push({
+          slotId: bookingId,
+          kind: 'booking',
+          userId: data.userId || '',
+          checkInDate: proposal.checkInDate,
+          checkOutDate: proposal.checkOutDate,
+          status: 'confirmed',
+          updatedAt: nowIso,
+        });
+        tx.set(targetLockRef, { roomId: proposal.roomId, slots: nextTargetSlots, updatedAt: nowIso }, { merge: true });
+
+        updatedData = { ...data, ...updates, status: 'confirmed', proposedChanges: { ...proposal, status: 'accepted' } } as Booking;
+      } else {
+        const historyItem: BookingHistoryItem = {
+          id: `hist_${nowMs}`,
+          timestamp: nowIso,
+          action: 'Customer Declined Proposed Changes',
+          performedBy: userEmail,
+          note: 'Kept original reservation request.',
+        };
+
+        const updates = sanitizeForFirestore({
+          status: 'pending',
+          proposedChanges: { ...proposal, status: 'declined' },
+          bookingHistory: [...currentHistory, historyItem],
+          updatedAt: nowIso,
+        });
+
+        tx.update(bRef, updates);
+        updatedData = { ...data, ...updates, status: 'pending', proposedChanges: { ...proposal, status: 'declined' } } as Booking;
+      }
+    });
+
+    await addDoc(collection(db, 'notifications'), {
+      recipientUid: 'admin',
+      type: 'proposal',
+      title: accept ? 'Customer Accepted Proposed Change' : 'Customer Declined Proposed Change',
+      message: accept
+        ? `Guest ${updatedData.guestName} accepted proposed change for reservation ${updatedData.bookingReference}.`
+        : `Guest ${updatedData.guestName} declined proposed change for reservation ${updatedData.bookingReference}. Awaiting host review.`,
+      bookingId,
+      bookingReference: updatedData.bookingReference,
+      isRead: false,
+      createdAt: new Date().toISOString(),
+    });
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1249,29 +1854,19 @@ export async function requestBookingCancellation(
   const userEmail = typeof arg3 === 'string' ? arg3 : 'guest';
 
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      action: 'Cancellation Requested by Guest',
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'cancellation_requested',
+      actionLabel: 'Cancellation Requested by Guest',
       performedBy: userEmail,
-      note: reason
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      status: 'cancellation_requested',
-      cancellationReason: reason,
-      cancellationRequestedAt: new Date().toISOString(),
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: new Date().toISOString()
+      note: reason || '',
+      buildUpdates: (_current, nowIso) => ({
+        status: 'cancellation_requested',
+        cancellationReason: reason,
+        cancellationRequestedAt: nowIso,
+      }),
     });
 
-    // Notify admin
     await addDoc(collection(db, 'notifications'), {
       recipientUid: 'admin',
       type: 'cancellation',
@@ -1283,6 +1878,7 @@ export async function requestBookingCancellation(
       createdAt: new Date().toISOString()
     });
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1294,69 +1890,38 @@ export async function resolveCancellationRequest(
   note?: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
+    const targetStatus: BookingStatus = approved ? 'cancelled' : 'confirmed';
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus,
+      actionLabel: approved ? 'Cancellation Approved by Admin' : 'Cancellation Request Declined',
+      performedBy: adminEmail,
+      note: note || (approved ? 'Reservation cancelled.' : 'Booking remains active per cancellation policy window.'),
+      buildUpdates: (current) =>
+        approved
+          ? {
+              status: 'cancelled',
+              refundStatus: current.paymentStatus === 'paid' ? 'pending' : 'none',
+            }
+          : {
+              status: 'confirmed',
+            },
+    });
 
-    const data = bSnap.data() as Booking;
-    const currentHistory = data.bookingHistory || [];
-
-    if (approved) {
-      const historyItem: BookingHistoryItem = {
-        id: `hist_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        action: 'Cancellation Approved by Admin',
-        performedBy: adminEmail,
-        note: note || 'Reservation cancelled.'
-      };
-
-      const refundNeeded = data.paymentStatus === 'paid';
-      await updateDoc(bRef, {
-        status: 'cancelled',
-        refundStatus: refundNeeded ? 'pending' : 'none',
-        bookingHistory: [...currentHistory, historyItem],
-        updatedAt: new Date().toISOString()
+    if (data.userId) {
+      const refundNeeded = approved && data.paymentStatus === 'paid';
+      await addDoc(collection(db, 'notifications'), {
+        recipientUid: data.userId,
+        type: 'cancellation',
+        title: approved ? 'Cancellation Request Approved' : 'Cancellation Request Not Approved',
+        message: approved
+          ? `Your cancellation request for ${data.bookingReference} has been processed.${refundNeeded ? ' Any eligible refund is under verification.' : ''}`
+          : `Your cancellation request for ${data.bookingReference} could not be approved: ${note || 'Reservation remains confirmed.'}`,
+        bookingId,
+        bookingReference: data.bookingReference,
+        isRead: false,
+        createdAt: new Date().toISOString()
       });
-
-      if (data.userId) {
-        await addDoc(collection(db, 'notifications'), {
-          recipientUid: data.userId,
-          type: 'cancellation',
-          title: 'Cancellation Request Approved',
-          message: `Your cancellation request for ${data.bookingReference} has been processed.${refundNeeded ? ' Any eligible refund is under verification.' : ''}`,
-          bookingId,
-          bookingReference: data.bookingReference,
-          isRead: false,
-          createdAt: new Date().toISOString()
-        });
-      }
-    } else {
-      const historyItem: BookingHistoryItem = {
-        id: `hist_${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        action: 'Cancellation Request Declined',
-        performedBy: adminEmail,
-        note: note || 'Booking remains active per cancellation policy window.'
-      };
-
-      await updateDoc(bRef, {
-        status: 'confirmed',
-        bookingHistory: [...currentHistory, historyItem],
-        updatedAt: new Date().toISOString()
-      });
-
-      if (data.userId) {
-        await addDoc(collection(db, 'notifications'), {
-          recipientUid: data.userId,
-          type: 'cancellation',
-          title: 'Cancellation Request Not Approved',
-          message: `Your cancellation request for ${data.bookingReference} could not be approved: ${note || 'Reservation remains confirmed.'}`,
-          bookingId,
-          bookingReference: data.bookingReference,
-          isRead: false,
-          createdAt: new Date().toISOString()
-        });
-      }
     }
 
     await logAdminAudit(
@@ -1367,6 +1932,7 @@ export async function resolveCancellationRequest(
       { approved, note: note || '' }
     );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1377,28 +1943,20 @@ export async function verifyBookingPayment(
   note?: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      action: 'Payment Verified by Admin',
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'confirmed',
+      validateTransition: false,
+      actionLabel: 'Payment Verified by Admin',
       performedBy: adminEmail,
-      note: note || 'Verified via bank receipt / UPI reference.'
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      paymentStatus: 'paid',
-      paymentVerified: true,
-      paymentVerifiedBy: adminEmail,
-      paymentVerifiedAt: new Date().toISOString(),
-      status: 'confirmed',
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: new Date().toISOString()
+      note: note || 'Verified via bank receipt / UPI reference.',
+      buildUpdates: (_current, nowIso) => ({
+        paymentStatus: 'paid',
+        paymentVerified: true,
+        paymentVerifiedBy: adminEmail,
+        paymentVerifiedAt: nowIso,
+        status: 'confirmed',
+      }),
     });
 
     if (data.userId) {
@@ -1422,6 +1980,7 @@ export async function verifyBookingPayment(
       { amount: data.totalAmount, note: note || '' }
     );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1432,27 +1991,16 @@ export async function checkInGuest(
   note?: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const nowIso = new Date().toISOString();
-
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: nowIso,
-      action: 'Official Check-In Completed',
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'checked_in',
+      actionLabel: 'Official Check-In Completed',
       performedBy: adminEmail,
-      note: note || 'Room keys handed over, ID verified.'
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      status: 'checked_in',
-      actualCheckInTime: nowIso,
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: nowIso
+      note: note || 'Room keys handed over, ID verified.',
+      buildUpdates: (_current, nowIso) => ({
+        status: 'checked_in',
+        actualCheckInTime: nowIso,
+      }),
     });
 
     if (data.userId) {
@@ -1464,7 +2012,7 @@ export async function checkInGuest(
         bookingId,
         bookingReference: data.bookingReference,
         isRead: false,
-        createdAt: nowIso
+        createdAt: new Date().toISOString()
       });
     }
 
@@ -1476,6 +2024,7 @@ export async function checkInGuest(
       { note: note || '' }
     );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -1486,27 +2035,16 @@ export async function checkOutGuest(
   note?: string
 ): Promise<void> {
   try {
-    const bRef = doc(db, 'bookings', bookingId);
-    const bSnap = await getDoc(bRef);
-    if (!bSnap.exists()) throw new Error('Booking not found');
-
-    const data = bSnap.data() as Booking;
-    const nowIso = new Date().toISOString();
-
-    const historyItem: BookingHistoryItem = {
-      id: `hist_${Date.now()}`,
-      timestamp: nowIso,
-      action: 'Official Check-Out Completed',
+    const { booking: data } = await mutateBookingAndSyncLock({
+      bookingId,
+      targetStatus: 'checked_out',
+      actionLabel: 'Official Check-Out Completed',
       performedBy: adminEmail,
-      note: note || 'Keys returned, room settlement finalized.'
-    };
-
-    const currentHistory = data.bookingHistory || [];
-    await updateDoc(bRef, {
-      status: 'checked_out',
-      actualCheckOutTime: nowIso,
-      bookingHistory: [...currentHistory, historyItem],
-      updatedAt: nowIso
+      note: note || 'Keys returned, room settlement finalized.',
+      buildUpdates: (_current, nowIso) => ({
+        status: 'checked_out',
+        actualCheckOutTime: nowIso,
+      }),
     });
 
     // Automatically trigger a turnover cleaning task
@@ -1533,7 +2071,7 @@ export async function checkOutGuest(
         bookingId,
         bookingReference: data.bookingReference,
         isRead: false,
-        createdAt: nowIso
+        createdAt: new Date().toISOString()
       });
     }
 
@@ -1545,6 +2083,7 @@ export async function checkOutGuest(
       { note: note || '' }
     );
   } catch (error) {
+    if (error instanceof BookingDomainError) throw error;
     handleFirestoreError(error, OperationType.UPDATE, `bookings/${bookingId}`);
   }
 }
@@ -2494,11 +3033,20 @@ export async function submitCustomerFeedback(
   data: Omit<CustomerFeedback, 'id' | 'createdAt'>
 ): Promise<string> {
   try {
-    const payload = {
-      ...data,
+    const cleanPayload: Record<string, any> = {
+      guestName: data.guestName,
+      rating: data.rating,
+      category: data.category,
+      comments: data.comments,
+      verifiedStay: Boolean(data.verifiedStay),
       createdAt: new Date().toISOString()
     };
-    const res = await addDoc(collection(db, 'customerFeedback'), payload);
+    if (data.userId) cleanPayload.userId = data.userId;
+    if (data.bookingReference) cleanPayload.bookingReference = data.bookingReference;
+    if (data.roomNumber) cleanPayload.roomNumber = data.roomNumber;
+    if (data.subRatings) cleanPayload.subRatings = data.subRatings;
+
+    const res = await addDoc(collection(db, 'customerFeedback'), cleanPayload);
     return res.id;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, 'customerFeedback');

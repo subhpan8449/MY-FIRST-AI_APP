@@ -1,3 +1,8 @@
+import {
+  acquireOrRefreshInventoryHold,
+  releaseInventoryHoldRecord,
+} from './db';
+
 export interface PriceCalculationResult {
   success: boolean;
   nights: number;
@@ -54,35 +59,50 @@ export async function calculateServerPrice(params: {
   return res.json();
 }
 
+/**
+ * Acquires or refreshes a persistent, transactional Firestore temporary inventory hold
+ * (with atomic roomLocks/{roomId} serialization). Never uses volatile memory-only fallbacks
+ * or masks errors with generic hold messages.
+ */
 export async function createInventoryHold(params: {
   roomId: string;
+  roomName?: string;
   checkInDate: string;
   checkOutDate: string;
   userId: string;
+  adults?: number;
+  children?: number;
+  existingHoldId?: string | null;
 }): Promise<{ holdId: string; expiresAt: number; expiresInMinutes: number }> {
-  const res = await fetch('/api/bookings/hold', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params)
+  return acquireOrRefreshInventoryHold({
+    roomId: params.roomId,
+    roomName: params.roomName,
+    checkInDate: params.checkInDate,
+    checkOutDate: params.checkOutDate,
+    adults: params.adults,
+    children: params.children,
+    existingHoldId: params.existingHoldId,
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || 'Room is unavailable or currently held by another guest');
-  }
-
-  return res.json();
 }
 
-export async function releaseInventoryHold(holdId: string): Promise<void> {
+export async function releaseInventoryHold(
+  holdId: string,
+  roomIdHint?: string,
+  targetStatus: 'released' | 'expired' = 'released'
+): Promise<void> {
+  try {
+    await releaseInventoryHoldRecord(holdId, roomIdHint, targetStatus);
+  } catch (err) {
+    console.warn('Firestore hold release notice:', err);
+  }
   try {
     await fetch('/api/bookings/release-hold', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ holdId })
     });
-  } catch (err) {
-    console.warn('Hold release error:', err);
+  } catch {
+    // Server release is optional clean-up
   }
 }
 

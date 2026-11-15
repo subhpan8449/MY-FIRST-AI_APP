@@ -18,6 +18,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { MessagingService } from '../services/messagingService';
 import { SupportConversation, SupportMessage } from '../types';
+import { renderRichAiMessage } from '../utils/formatAiText';
 
 export const AdminSupportInbox: React.FC = () => {
   const { userProfile, currentUser } = useAuth();
@@ -105,7 +106,8 @@ export const AdminSupportInbox: React.FC = () => {
         customerName: selectedConv.customerName,
         lastMessage: selectedConv.lastMessage,
         bookingReference: selectedConv.bookingReference,
-        roomNumber: selectedConv.roomNumber
+        roomNumber: selectedConv.roomNumber,
+        history: messages
       });
       if (draft) {
         setReplyText(draft);
@@ -336,8 +338,13 @@ export const AdminSupportInbox: React.FC = () => {
                         key={m.id}
                         className={`flex flex-col ${isAdmin ? 'items-end' : 'items-start'}`}
                       >
-                        <div className="flex items-center gap-1 text-[11px] text-slate-500 mb-1 px-1">
-                          <span>{isAdmin ? 'Homestay Host' : m.senderName || 'Guest'}</span>
+                        <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mb-1 px-1">
+                          <span>{isAdmin ? m.senderName || 'Homestay Host' : m.senderName || 'Guest'}</span>
+                          {isAdmin && m.suggestedByAI && (
+                            <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.2 text-[9px] text-emerald-300 font-semibold">
+                              Auto Host Reply
+                            </span>
+                          )}
                           <span>•</span>
                           <span>{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                         </div>
@@ -348,7 +355,11 @@ export const AdminSupportInbox: React.FC = () => {
                               : 'bg-slate-800 text-slate-100 border border-slate-700/80 rounded-tl-none'
                           }`}
                         >
-                          <p className="whitespace-pre-wrap break-words">{m.text}</p>
+                          {isAdmin ? (
+                            renderRichAiMessage(m.text, 'dark')
+                          ) : (
+                            <p className="whitespace-pre-wrap break-words">{m.text}</p>
+                          )}
                         </div>
                       </div>
                     );

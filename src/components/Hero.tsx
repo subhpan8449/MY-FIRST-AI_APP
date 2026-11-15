@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { Calendar, Users, Waves, Baby, Eye, Sparkles, MapPin, Search, RotateCcw, Filter, Utensils, Compass, Bed, ShieldCheck } from 'lucide-react';
+import { Calendar, Users, Waves, Baby, Eye, Sparkles, MapPin, Search, RotateCcw, Filter, Utensils, Compass, Bed, ShieldCheck, Award } from 'lucide-react';
 import { SearchFilters } from '../types';
 import { SmoothImage } from './SmoothImage';
+import { useFestivalTheme } from '../context/FestivalThemeContext';
+import { getTodayDateString, addDaysToDateString } from '../utils/bookingAvailability';
 
 const HERO_BACKDROP_PHOTO =
   'https://images.unsplash.com/photo-1626621341517-bbf3d9990a23?auto=format&fit=crop&w=1600&q=85';
@@ -20,6 +22,7 @@ interface HeroProps {
   onExploreDining?: () => void;
   onOpen3DViewer?: () => void;
   onOpenPlayAndEarn?: () => void;
+  onOpenRewards?: () => void;
   onOpenCustomerAuth?: () => void;
   onOpenAdminAuth?: () => void;
   guestName?: string | null;
@@ -35,22 +38,23 @@ export const Hero: React.FC<HeroProps> = ({
   onExploreDining,
   onOpen3DViewer,
   onOpenPlayAndEarn,
+  onOpenRewards,
   onOpenCustomerAuth,
   onOpenAdminAuth,
   guestName,
   isAdmin,
   activeFilters
 }) => {
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dayAfter = new Date();
-  dayAfter.setDate(dayAfter.getDate() + 3);
+  const { themeMeta } = useFestivalTheme();
+  const todayStr = getTodayDateString();
+  const defaultInStr = addDaysToDateString(todayStr, 1);
+  const defaultOutStr = addDaysToDateString(defaultInStr, 2);
 
   const [checkIn, setCheckIn] = useState(
-    activeFilters?.checkInDate || tomorrow.toISOString().split('T')[0]
+    activeFilters?.checkInDate || defaultInStr
   );
   const [checkOut, setCheckOut] = useState(
-    activeFilters?.checkOutDate || dayAfter.toISOString().split('T')[0]
+    activeFilters?.checkOutDate || defaultOutStr
   );
   const [adults, setAdults] = useState(activeFilters?.adults || 2);
   const [childrenCount, setChildrenCount] = useState(activeFilters?.children || 0);
@@ -84,8 +88,8 @@ export const Hero: React.FC<HeroProps> = ({
   };
 
   const handleResetFilters = () => {
-    const defaultIn = tomorrow.toISOString().split('T')[0];
-    const defaultOut = dayAfter.toISOString().split('T')[0];
+    const defaultIn = addDaysToDateString(getTodayDateString(), 1);
+    const defaultOut = addDaysToDateString(defaultIn, 2);
     setCheckIn(defaultIn);
     setCheckOut(defaultOut);
     setAdults(2);
@@ -128,7 +132,7 @@ export const Hero: React.FC<HeroProps> = ({
   };
 
   return (
-    <div className="relative overflow-hidden bg-gradient-to-b from-amber-50/70 via-stone-50 to-white pb-16 lg:pb-20 border-b border-stone-200">
+    <div className="relative overflow-hidden bg-gradient-to-b from-amber-50/50 via-stone-50 to-white pb-16 lg:pb-20 border-b border-stone-200">
       {/* Real Himalayan & Ganga Scenic Hero Backdrop Banner */}
       <div className="relative overflow-hidden pt-10 pb-20 lg:pt-14 lg:pb-24 bg-stone-900">
         <SmoothImage
@@ -137,16 +141,21 @@ export const Hero: React.FC<HeroProps> = ({
           alt="Devashish Sunlit Homestay in Tapovan, Rishikesh overlooking Himalayan foothills and the sacred Ganga"
           priority
           wrapperClassName="!absolute inset-0 w-full h-full"
-          className="w-full h-full object-cover object-center opacity-45"
+          className="w-full h-full object-cover object-center opacity-50"
         />
-        <div className="absolute inset-0 bg-gradient-to-b from-stone-950/75 via-stone-950/60 to-stone-950/85" />
+        <div
+          className={`absolute inset-0 bg-gradient-to-b ${themeMeta.bgGradient} transition-all duration-500`}
+        />
 
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           {/* Main Hero Header */}
           <div className="text-center max-w-3xl mx-auto space-y-4">
-            <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-amber-200 bg-amber-950/70 backdrop-blur-xs px-3.5 py-1 rounded-md border border-amber-500/40 shadow-sm">
-              <MapPin className="w-3.5 h-3.5 text-amber-400" />
-              <span>Tapovan, Rishikesh · Himalayan Foothills</span>
+            <div
+              className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider px-3.5 py-1 rounded-md border border-white/25 backdrop-blur-xs shadow-sm text-white"
+              style={{ backgroundColor: themeMeta.palette?.headerBg || 'rgba(69, 26, 3, 0.78)' }}
+            >
+              <MapPin className="w-3.5 h-3.5" style={{ color: themeMeta.accentColor }} />
+              <span>Tapovan, Rishikesh · {themeMeta.id === 'regular' ? 'Himalayan Foothills' : themeMeta.badge}</span>
             </div>
 
             <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-white tracking-tight leading-tight drop-shadow-md">
@@ -221,6 +230,17 @@ export const Hero: React.FC<HeroProps> = ({
                 </button>
               )}
 
+              {onOpenRewards && (
+                <button
+                  type="button"
+                  onClick={onOpenRewards}
+                  className="px-4 py-2 rounded-xl bg-white/15 hover:bg-white/25 text-amber-200 border border-amber-400/40 backdrop-blur-xs font-bold text-xs transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <Award className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Sunlit Rewards</span>
+                </button>
+              )}
+
               {!guestName && onOpenCustomerAuth && (
                 <button
                   type="button"
@@ -238,10 +258,14 @@ export const Hero: React.FC<HeroProps> = ({
               )}
 
               {guestName && (
-                <span className="px-3.5 py-2 rounded-xl bg-emerald-950/75 text-emerald-200 border border-emerald-500/40 font-bold text-xs flex items-center gap-1.5 backdrop-blur-xs">
+                <button
+                  type="button"
+                  onClick={onOpenRewards}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-950/75 hover:bg-emerald-900/80 text-emerald-200 border border-emerald-500/40 font-bold text-xs flex items-center gap-1.5 backdrop-blur-xs cursor-pointer transition"
+                >
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Welcome, {guestName.split(' ')[0]}</span>
-                </span>
+                </button>
               )}
 
               {onOpenAdminAuth && (
@@ -262,14 +286,17 @@ export const Hero: React.FC<HeroProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 -mt-10">
         {/* COMPREHENSIVE ADVANCED ROOM SEARCH PANEL */}
         <div className="max-w-5xl mx-auto bg-white rounded-2xl shadow-xl border border-stone-200/90 overflow-hidden">
-          <div className="bg-amber-900 px-6 py-3 text-white flex items-center justify-between">
+          <div
+            className="px-6 py-3 text-white flex items-center justify-between transition-colors duration-300"
+            style={{ backgroundColor: themeMeta.palette?.headerBg || '#78350F' }}
+          >
             <div className="flex items-center gap-2">
-              <Search className="w-4 h-4 text-amber-300" />
+              <Search className="w-4 h-4" style={{ color: themeMeta.accentColor }} />
               <h2 className="text-xs sm:text-sm font-bold tracking-wide uppercase">
-                Find Available Rooms & Instant Direct Booking
+                Find Available Rooms &amp; Instant Direct Booking
               </h2>
             </div>
-            <span className="text-[11px] text-amber-200 hidden sm:inline">
+            <span className="text-[11px] text-white/80 hidden sm:inline">
               Real-time availability · No booking fee
             </span>
           </div>
@@ -286,13 +313,12 @@ export const Hero: React.FC<HeroProps> = ({
                 <input
                   type="date"
                   value={checkIn}
-                  min={new Date().toISOString().split('T')[0]}
+                  min={todayStr}
                   onChange={(e) => {
-                    setCheckIn(e.target.value);
-                    if (new Date(e.target.value) >= new Date(checkOut)) {
-                      const next = new Date(e.target.value);
-                      next.setDate(next.getDate() + 1);
-                      setCheckOut(next.toISOString().split('T')[0]);
+                    const nextIn = e.target.value;
+                    setCheckIn(nextIn);
+                    if (nextIn && (!checkOut || checkOut <= nextIn)) {
+                      setCheckOut(addDaysToDateString(nextIn, 1));
                     }
                   }}
                   className="w-full px-3 py-2 text-xs bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600 focus:bg-white"
@@ -309,7 +335,7 @@ export const Hero: React.FC<HeroProps> = ({
                 <input
                   type="date"
                   value={checkOut}
-                  min={checkIn}
+                  min={addDaysToDateString(checkIn || todayStr, 1)}
                   onChange={(e) => setCheckOut(e.target.value)}
                   className="w-full px-3 py-2 text-xs bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600 focus:bg-white"
                   required

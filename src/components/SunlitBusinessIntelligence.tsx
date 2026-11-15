@@ -18,6 +18,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { Booking, Room } from '../types';
+import { useFestivalTheme } from '../context/FestivalThemeContext';
 
 interface SunlitBusinessIntelligenceProps {
   bookings: Booking[];
@@ -30,6 +31,7 @@ export const SunlitBusinessIntelligence: React.FC<SunlitBusinessIntelligenceProp
   bookings,
   rooms,
 }) => {
+  const { themeMeta } = useFestivalTheme();
   const [horizon, setHorizon] = useState<TimeHorizon>('30d');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'overview' | 'revenue' | 'occupancy' | 'forecasting' | 'ledger'>('overview');
@@ -198,15 +200,21 @@ export const SunlitBusinessIntelligence: React.FC<SunlitBusinessIntelligenceProp
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto text-stone-900 pb-12">
-      {/* Top BI Header */}
-      <div className="bg-gradient-to-r from-stone-950 via-stone-900 to-amber-950 text-white rounded-3xl p-6 sm:p-8 shadow-xl border border-amber-900/40 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+      {/* Top BI Header — Dynamic Festival Theme Colors */}
+      <div
+        className="text-white rounded-3xl p-6 sm:p-8 shadow-xl border border-white/15 relative overflow-hidden transition-all duration-300"
+        style={{ background: themeMeta.palette?.adminBannerGradient || 'linear-gradient(135deg, #1C1917 0%, #451A03 100%)' }}
+      >
+        <div
+          className="absolute top-0 right-0 w-96 h-96 rounded-full blur-3xl pointer-events-none opacity-25"
+          style={{ backgroundColor: themeMeta.primaryColor }}
+        />
         
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div>
-            <div className="flex items-center gap-2.5 mb-2">
-              <span className="px-3 py-1 rounded-full text-[11px] font-bold tracking-widest uppercase bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                Power BI Enterprise Suite
+            <div className="flex flex-wrap items-center gap-2.5 mb-2">
+              <span className="px-3 py-1 rounded-full text-[11px] font-bold tracking-widest uppercase bg-white/15 text-amber-200 border border-white/20">
+                Power BI Enterprise Suite · {themeMeta.name.split('—')[0].trim()}
               </span>
               <span className="flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-950/60 px-2.5 py-0.5 rounded-full border border-emerald-800/60">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />

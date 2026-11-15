@@ -21,9 +21,11 @@ import {
   PriceType,
   CustomerFeedback,
   Attraction,
-  GuestIdDocument
+  GuestIdDocument,
+  InventoryHold
 } from '../types';
 import { useAuth, PRIMARY_OWNER_EMAIL } from '../context/AuthContext';
+import { useFestivalTheme } from '../context/FestivalThemeContext';
 import {
   getRooms,
   addRoom,
@@ -61,7 +63,9 @@ import {
   getCustomerFeedback,
   respondToCustomerFeedback,
   getAllGuestDocuments,
-  verifyGuestDocument
+  verifyGuestDocument,
+  getInventoryHolds,
+  syncRoomLocksFromBookings
 } from '../services/db';
 import {
   computeBusinessMetrics,
@@ -177,6 +181,8 @@ export type AdminTab =
 
 export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRefreshData }) => {
   const { currentUser, isPrimaryOwner } = useAuth();
+  const { themeMeta } = useFestivalTheme();
+  const palette = themeMeta.palette;
 
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [periodFilter, setPeriodFilter] = useState<'today' | 'week' | 'month' | 'year'>('month');
@@ -199,6 +205,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
   const [feedbackList, setFeedbackList] = useState<CustomerFeedback[]>([]);
   const [aiInsights, setAiInsights] = useState<AIInsight[]>([]);
   const [guestDocuments, setGuestDocuments] = useState<GuestIdDocument[]>([]);
+  const [inventoryHolds, setInventoryHolds] = useState<InventoryHold[]>([]);
 
   // Search & Filters
   const [bookingSearch, setBookingSearch] = useState('');
@@ -317,7 +324,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
         staffList,
         pHist,
         fBack,
-        gDocsList
+        gDocsList,
+        holdsList
       ] = await Promise.all([
         getRooms(),
         getBookings(),
@@ -334,7 +342,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
         getStaffMembers(),
         getPricingHistory(),
         getCustomerFeedback(),
-        getAllGuestDocuments()
+        getAllGuestDocuments(),
+        getInventoryHolds().catch(() => [] as InventoryHold[])
       ]);
 
       setRooms(rList);
@@ -353,6 +362,9 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
       setPricingHistory(pHist);
       setFeedbackList(fBack);
       setGuestDocuments(gDocsList || []);
+      setInventoryHolds(holdsList || []);
+      // Non-blocking reconciliation so legacy bookings populate PII-free roomLocks/{roomId}
+      syncRoomLocksFromBookings(bList, holdsList || []).catch(console.warn);
     } catch (err: any) {
       console.error('Error fetching admin data:', err);
       setStatusMessage({ type: 'error', text: 'Failed to load database records.' });
@@ -709,35 +721,53 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
   return (
     <div className="fixed inset-0 z-50 overflow-hidden bg-stone-900/75 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
       <div className="bg-stone-50 rounded-2xl w-full h-[96vh] max-w-[1440px] overflow-hidden shadow-2xl border border-stone-300 flex flex-col">
-        {/* Top Header */}
-        <div className="bg-amber-950 px-6 py-3.5 text-white flex items-center justify-between border-b border-amber-900 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-amber-800 rounded-lg shadow-xs">
-              <ShieldCheck className="w-5 h-5 text-amber-200" />
+        {/* Top Header — Dynamically Styled by Sunlit Festival Magic */}
+        <div
+          className="px-6 py-3.5 text-white flex items-center justify-between border-b border-white/15 shrink-0 transition-colors duration-300"
+          style={{ background: palette?.adminBannerGradient || '#451A03' }}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className="p-2 rounded-lg shadow-xs border border-white/20"
+              style={{ backgroundColor: palette?.adminAccentBg || '#B45309' }}
+            >
+              <ShieldCheck className="w-5 h-5 text-white" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-base font-extrabold tracking-tight">DEVASHISH SUNLIT HOMESTAY</h2>
-                <span className="bg-amber-800/80 text-amber-200 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                <span className="bg-white/15 text-amber-200 text-[10px] font-bold px-2 py-0.5 rounded uppercase border border-white/15">
                   Master Admin Corner
                 </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('festival')}
+                  className="bg-black/30 hover:bg-black/45 text-white text-[10px] font-bold px-2.5 py-0.5 rounded-full border border-white/25 inline-flex items-center gap-1 cursor-pointer transition"
+                  title="Change active festival dashboard palette"
+                >
+                  <span
+                    className="w-2 h-2 rounded-full"
+                    style={{ backgroundColor: themeMeta.primaryColor }}
+                  />
+                  <span>Theme: {themeMeta.name.split('—')[0].trim()}</span>
+                </button>
               </div>
-              <p className="text-xs text-amber-300/80 mt-0.5">
-                Tapovan, Rishikesh · Equal Admin Permissions · Subhashish Pandey & Vivek Singh Negi
+              <p className="text-xs text-white/75 mt-0.5 truncate">
+                Tapovan, Rishikesh · Equal Admin Permissions · Subhashish Pandey &amp; Vivek Singh Negi
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <div className="text-right hidden sm:block">
-              <span className="text-xs font-semibold text-stone-200 block">{currentUser?.email}</span>
-              <span className="text-[10px] text-amber-400 font-medium">
+              <span className="text-xs font-semibold text-stone-100 block">{currentUser?.email}</span>
+              <span className="text-[10px] font-medium" style={{ color: themeMeta.accentColor }}>
                 {isPrimaryOwner ? 'Primary Owner & Administrator' : 'Authorized Co-Administrator'}
               </span>
             </div>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg bg-amber-900/60 hover:bg-amber-900 text-stone-200 hover:text-white transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -761,9 +791,15 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
         {/* Main Body (Sidebar + Content Workspace) */}
         <div className="flex-1 flex overflow-hidden">
           {/* Sidebar Navigation */}
-          <div className="w-64 bg-stone-900 text-stone-300 flex flex-col border-r border-stone-800 shrink-0">
-            <div className="p-3 border-b border-stone-800 text-[11px] font-bold uppercase tracking-wider text-amber-400">
-              Executive & Operations Modules (25)
+          <div
+            className="w-64 text-stone-300 flex flex-col border-r border-white/10 shrink-0 transition-colors duration-300"
+            style={{ backgroundColor: palette?.adminSidebarBg || '#1C1917' }}
+          >
+            <div
+              className="p-3 border-b border-white/10 text-[11px] font-bold uppercase tracking-wider"
+              style={{ color: themeMeta.accentColor }}
+            >
+              Executive &amp; Operations Modules (25)
             </div>
             <div className="flex-1 overflow-y-auto p-2 space-y-0.5 text-xs">
               {NAV_ITEMS.map((item) => {
@@ -773,14 +809,19 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
                   <button
                     key={item.id}
                     onClick={() => setActiveTab(item.id)}
+                    style={
+                      isActive
+                        ? { backgroundColor: palette?.adminAccentBg || '#B45309' }
+                        : undefined
+                    }
                     className={`w-full flex items-center justify-between px-3 py-2 rounded-lg transition-colors cursor-pointer text-left ${
                       isActive
-                        ? 'bg-amber-700 text-white font-bold shadow-xs'
-                        : 'text-stone-300 hover:bg-stone-800 hover:text-white'
+                        ? 'text-white font-bold shadow-xs'
+                        : 'text-stone-300 hover:bg-white/10 hover:text-white'
                     }`}
                   >
                     <div className="flex items-center gap-2.5 truncate">
-                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-amber-200' : 'text-stone-400'}`} />
+                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-stone-400'}`} />
                       <span className="truncate">{item.label}</span>
                     </div>
                     {item.id === 'service-requests' && serviceRequests.filter(s => s.status === 'submitted').length > 0 && (
@@ -798,14 +839,17 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
               })}
             </div>
 
-            <div className="p-3 bg-stone-950 border-t border-stone-800 text-[10px] text-stone-400 flex items-center justify-between">
-              <span>Devashish Homestay v2.5</span>
+            <div className="p-3 bg-black/35 border-t border-white/10 text-[10px] text-stone-400 flex items-center justify-between">
+              <span>Devashish Homestay v2.6</span>
               <span className="text-emerald-400 font-semibold">● Firestore Active</span>
             </div>
           </div>
 
           {/* Active Workspace Container */}
-          <div className="flex-1 overflow-y-auto bg-stone-100/70 p-6 space-y-6">
+          <div
+            className="flex-1 overflow-y-auto p-6 space-y-6 transition-colors duration-300"
+            style={{ backgroundColor: palette?.surfaceTint || '#F5F5F4' }}
+          >
             {/* 1. BUSINESS OVERVIEW */}
             {activeTab === 'overview' && (
               <div className="space-y-6 max-w-6xl mx-auto">
@@ -864,20 +908,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
                   const urgentTriage = bookings.filter(b => b.status === 'awaiting_admin_approval' || b.status === 'cancellation_requested' || b.status === 'pending');
 
                   return (
-                    <div className="bg-gradient-to-br from-stone-900 to-stone-850 text-white rounded-2xl p-5 border border-stone-800 shadow-md">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-stone-800">
+                    <div
+                      className="text-white rounded-2xl p-5 border border-white/15 shadow-md transition-all duration-300"
+                      style={{ background: palette?.adminBannerGradient || '#1C1917' }}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-white/15">
                         <div className="flex items-center gap-2.5">
                           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
                           <div>
-                            <h4 className="font-bold text-sm tracking-wide text-amber-200">
+                            <h4 className="font-bold text-sm tracking-wide" style={{ color: themeMeta.accentColor }}>
                               Today's Operations Center — {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })}
                             </h4>
-                            <p className="text-[11px] text-stone-400">Live operational dispatch for front-desk, housekeeping & arrivals</p>
+                            <p className="text-[11px] text-white/75">Live operational dispatch for front-desk, housekeeping &amp; arrivals · {themeMeta.badge}</p>
                           </div>
                         </div>
                         <button
                           onClick={() => setActiveTab('bookings')}
-                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+                          style={{ backgroundColor: palette?.adminAccentBg || '#D97706' }}
+                          className="px-3 py-1.5 hover:opacity-90 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
                         >
                           <span>Open 15-Tab Booking Center</span>
                           <ChevronRight className="w-3.5 h-3.5" />
@@ -1007,7 +1055,10 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
                 </div>
 
                 {/* Data-Backed AI Explanation Callout */}
-                <div className="bg-gradient-to-r from-amber-900 to-amber-950 rounded-2xl p-6 text-white shadow-md space-y-3">
+                <div
+                  className="rounded-2xl p-6 text-white shadow-md space-y-3 border border-white/15 transition-all duration-300"
+                  style={{ background: palette?.adminBannerGradient || '#451A03' }}
+                >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Brain className="w-5 h-5 text-amber-300" />
@@ -1705,6 +1756,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ isOpen, onClose, onRef
               <AdminBookingControlCenter
                 bookings={bookings}
                 rooms={rooms}
+                inventoryHolds={inventoryHolds}
                 adminEmail={currentUser?.email || PRIMARY_OWNER_EMAIL}
                 onRefresh={fetchAllData}
               />

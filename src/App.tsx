@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { Room, SearchFilters, TravelerPersona } from './types';
 import { getRooms, bootstrapInitialData } from './services/db';
 import { testConnection } from './firebase';
+import { getTodayDateString, addDaysToDateString } from './utils/bookingAvailability';
 import { computeSmartMatch, TRAVELER_PERSONAS } from './services/recommendationEngine';
 import { Navbar } from './components/Navbar';
 import { Hero } from './components/Hero';
@@ -31,15 +32,15 @@ import { FestivalThemeProvider, useFestivalTheme } from './context/FestivalTheme
 import { FestivalEffects } from './components/FestivalEffects';
 import { CustomerSupportChatModal } from './components/CustomerSupportChatModal';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
+import { SunlitRewards } from './components/SunlitRewards';
+import { ReviewsSection } from './components/ReviewsSection';
 import { Bed, Filter, CheckCircle2, AlertCircle, Box, Compass, Sparkles, RotateCcw, ArrowUpDown, MessageSquare, X } from 'lucide-react';
 
 const MainAppContent: React.FC = () => {
   const { currentUser, userProfile, isAdmin, authNotice, clearAuthNotice } = useAuth();
 
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dayAfter = new Date();
-  dayAfter.setDate(dayAfter.getDate() + 3);
+  const defaultCheckIn = addDaysToDateString(getTodayDateString(), 1);
+  const defaultCheckOut = addDaysToDateString(defaultCheckIn, 2);
 
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoomForBooking, setSelectedRoomForBooking] = useState<Room | null>(null);
@@ -50,8 +51,8 @@ const MainAppContent: React.FC = () => {
   const [travelerPersona, setTravelerPersona] = useState<TravelerPersona>('all');
 
   const [searchFilters, setSearchFilters] = useState<SearchFilters>({
-    checkInDate: tomorrow.toISOString().split('T')[0],
-    checkOutDate: dayAfter.toISOString().split('T')[0],
+    checkInDate: defaultCheckIn,
+    checkOutDate: defaultCheckOut,
     adults: 2,
     children: 0,
     roomsCount: 1,
@@ -75,6 +76,7 @@ const MainAppContent: React.FC = () => {
   const [isPlayAndEarnOpen, setIsPlayAndEarnOpen] = useState(false);
   const [isSupportChatOpen, setIsSupportChatOpen] = useState(false);
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
+  const [isRewardsOpen, setIsRewardsOpen] = useState(false);
   const [policyModalType, setPolicyModalType] = useState<'privacy' | 'terms' | 'cancellation' | null>(null);
 
   useEffect(() => {
@@ -238,11 +240,13 @@ const MainAppContent: React.FC = () => {
   }
 
   const handleResetFilters = () => {
+    const nextIn = addDaysToDateString(getTodayDateString(), 1);
+    const nextOut = addDaysToDateString(nextIn, 2);
     setCategoryFilter('all');
     setTravelerPersona('all');
     setSearchFilters({
-      checkInDate: tomorrow.toISOString().split('T')[0],
-      checkOutDate: dayAfter.toISOString().split('T')[0],
+      checkInDate: nextIn,
+      checkOutDate: nextOut,
       adults: 2,
       children: 0,
       roomsCount: 1,
@@ -255,24 +259,27 @@ const MainAppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-white pb-16 md:pb-0">
+    <div
+      className="min-h-screen flex flex-col pb-16 md:pb-0 transition-colors duration-300"
+      style={{ backgroundColor: themeMeta.palette?.surfaceTint || '#FFFFFF' }}
+    >
       {/* Sunlit Festival Magic Ambient Particles */}
       <FestivalEffects />
 
       {/* Dynamic Festival Announcement Banner */}
       {themeMeta.id !== 'regular' && (
-        <div 
-          className="text-white text-xs py-2 px-4 border-b border-white/10 flex flex-wrap items-center justify-between gap-2 shadow-inner"
-          style={{ background: `linear-gradient(90deg, ${themeMeta.secondaryColor}, #1e1b4b)` }}
+        <div
+          className="text-white text-xs py-2 px-4 border-b border-white/15 flex flex-wrap items-center justify-between gap-2 shadow-inner"
+          style={{ background: themeMeta.palette?.adminBannerGradient || `linear-gradient(90deg, ${themeMeta.secondaryColor}, #1e1b4b)` }}
         >
           <div className="flex items-center gap-2 max-w-4xl truncate">
             <span className="font-bold text-amber-300 shrink-0">{themeMeta.badge}</span>
-            <span className="text-white/90 truncate">{config.customGreeting || themeMeta.bannerMessage}</span>
+            <span className="text-white/95 truncate">{config.customGreeting || themeMeta.bannerMessage}</span>
           </div>
           <div className="flex items-center gap-3 shrink-0 text-[11px]">
-            <button 
+            <button
               onClick={toggleUserAnimation}
-              className="text-white/80 hover:text-white underline cursor-pointer"
+              className="text-white/85 hover:text-white underline cursor-pointer"
             >
               {userAnimationOverride ? 'Pause Effects' : 'Play Effects'}
             </button>
@@ -292,6 +299,7 @@ const MainAppContent: React.FC = () => {
         }}
         onOpenAdminLogin={handleOpenAdmin}
         onOpenMyBookings={() => setIsMyBookingsOpen(true)}
+        onOpenRewards={() => setIsRewardsOpen(true)}
         onOpenCustomerService={() => setIsCustomerServiceOpen(true)}
         onOpen3DViewer={() => {
           setSelectedRoomFor3D(rooms[0] || null);
@@ -313,6 +321,7 @@ const MainAppContent: React.FC = () => {
           onExploreDining={() => scrollToSection('dining')}
           onOpen3DViewer={() => setSelectedRoomFor3D(rooms[0] || null)}
           onOpenPlayAndEarn={() => setIsPlayAndEarnOpen(true)}
+          onOpenRewards={() => setIsRewardsOpen(true)}
           onOpenCustomerAuth={() => {
             setAuthInitialType('customer');
             setIsAuthModalOpen(true);
@@ -583,6 +592,14 @@ const MainAppContent: React.FC = () => {
         {/* CookNow Food Service Integration (Status & Guidelines) */}
         <CookNowSection />
 
+        {/* Verified Guest Reviews & Rating Breakdown */}
+        <ReviewsSection
+          onOpenAuth={() => {
+            setAuthInitialType('customer');
+            setIsAuthModalOpen(true);
+          }}
+        />
+
         {/* Host Contact & Enquiries */}
         <ContactSection />
       </main>
@@ -721,6 +738,7 @@ const MainAppContent: React.FC = () => {
       <MobileBottomNav
         onOpenBookings={() => setIsMyBookingsOpen(true)}
         onOpenPlayAndEarn={() => setIsPlayAndEarnOpen(true)}
+        onOpenRewards={() => setIsRewardsOpen(true)}
         onOpenAdmin={handleOpenAdmin}
         onOpenAuth={() => {
           setAuthInitialType('customer');
@@ -758,8 +776,30 @@ const MainAppContent: React.FC = () => {
         <SunlitPlayAndEarn
           isOpen={isPlayAndEarnOpen}
           onClose={() => setIsPlayAndEarnOpen(false)}
-          onSelectVoucherForBooking={(code) => {
+          onSelectVoucherForBooking={(_code) => {
             setIsBookingModalOpen(true);
+          }}
+        />
+      )}
+
+      {/* USER PROFILE & SUNLIT REWARDS LOYALTY MODAL */}
+      {isRewardsOpen && (
+        <SunlitRewards
+          isModal
+          isOpen={isRewardsOpen}
+          onClose={() => setIsRewardsOpen(false)}
+          onBookRoom={() => {
+            setIsRewardsOpen(false);
+            scrollToSection('rooms');
+          }}
+          onOpenPlayAndEarn={() => {
+            setIsRewardsOpen(false);
+            setIsPlayAndEarnOpen(true);
+          }}
+          onOpenAuth={() => {
+            setIsRewardsOpen(false);
+            setAuthInitialType('customer');
+            setIsAuthModalOpen(true);
           }}
         />
       )}

@@ -18,12 +18,31 @@ html {
   }
 }
 
+:root {
+  --sunlit-primary: #d97706;
+  --sunlit-secondary: #92400e;
+  --sunlit-accent: #fbbf24;
+  --sunlit-surface-tint: #fafaf9;
+  --sunlit-card-tint: #fef3c7;
+  --sunlit-card-border: #f59e0b;
+  --sunlit-header-bg: #451a03;
+  --sunlit-header-text: #fde68a;
+  --sunlit-button-bg: #b45309;
+  --sunlit-button-hover: #92400e;
+  --sunlit-admin-header: #451a03;
+  --sunlit-admin-sidebar: #1c1917;
+  --sunlit-admin-accent: #b45309;
+  --sunlit-glow: #d97706;
+}
+
 body {
   font-family: var(--font-sans);
   margin: 0;
   padding: 0;
   min-height: 100vh;
   overflow-x: clip;
+  background-color: var(--sunlit-surface-tint);
+  transition: background-color 0.35s ease;
 }
 
 img {

@@ -2,12 +2,15 @@ import React, { useState } from 'react';
 import {
   Booking,
   BookingStatus,
+  InventoryHold,
   ProposedBookingChanges,
   Room
 } from '../types';
 import {
   approveBooking,
   rejectBooking,
+  cancelBookingByAdmin,
+  releaseHoldByAdmin,
   proposeBookingChanges,
   resolveCancellationRequest,
   verifyBookingPayment,
@@ -16,6 +19,12 @@ import {
   addBookingInternalNote,
   createNotification
 } from '../services/db';
+import {
+  getTodayDateString,
+  addDaysToDateString,
+  evaluateRoomAvailability,
+  buildRoomLockSlotsFromRecords
+} from '../utils/bookingAvailability';
 import {
   Search,
   CheckCircle2,
@@ -42,6 +51,7 @@ import {
 interface AdminBookingControlCenterProps {
   bookings: Booking[];
   rooms: Room[];
+  inventoryHolds?: InventoryHold[];
   adminEmail: string;
   onRefresh: () => void;
   onSelectBookingForInvoice?: (booking: Booking) => void;
@@ -61,12 +71,16 @@ export type BookingControlTab =
   | 'cancellation_requests'
   | 'cancelled'
   | 'rejected'
+  | 'expired_failed'
+  | 'inventory_holds'
+  | 'room_availability'
   | 'refund_pending'
   | 'completed';
 
 export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps> = ({
   bookings,
   rooms,
+  inventoryHolds = [],
   adminEmail,
   onRefresh,
   onSelectBookingForInvoice
@@ -96,7 +110,10 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
   const [isProcessing, setIsProcessing] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getTodayDateString();
+  const tomorrowStr = addDaysToDateString(todayStr, 1);
+  const nowMs = Date.now();
+  const roomSlotsMap = buildRoomLockSlotsFromRecords(bookings, inventoryHolds, nowMs);
 
   // Filter categorization
   const getTabCount = (tab: BookingControlTab): number => {
@@ -110,7 +127,7 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
       case 'confirmed':
         return bookings.filter(b => b.status === 'confirmed').length;
       case 'payment_pending':
-        return bookings.filter(b => b.paymentStatus !== 'paid' && b.status !== 'cancelled' && b.status !== 'rejected').length;
+        return bookings.filter(b => b.paymentStatus !== 'paid' && b.status !== 'cancelled' && b.status !== 'rejected' && b.status !== 'expired' && b.status !== 'failed').length;
       case 'payment_verified':
         return bookings.filter(b => b.paymentStatus === 'paid' || b.paymentVerified).length;
       case 'checkin_today':
@@ -127,6 +144,12 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
         return bookings.filter(b => b.status === 'cancelled').length;
       case 'rejected':
         return bookings.filter(b => b.status === 'rejected').length;
+      case 'expired_failed':
+        return bookings.filter(b => b.status === 'expired' || b.status === 'failed').length;
+      case 'inventory_holds':
+        return inventoryHolds.length;
+      case 'room_availability':
+        return rooms.length;
       case 'refund_pending':
         return bookings.filter(b => b.refundStatus === 'pending').length;
       case 'completed':
@@ -153,7 +176,7 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
         matchesTab = b.status === 'confirmed';
         break;
       case 'payment_pending':
-        matchesTab = b.paymentStatus !== 'paid' && b.status !== 'cancelled' && b.status !== 'rejected';
+        matchesTab = b.paymentStatus !== 'paid' && b.status !== 'cancelled' && b.status !== 'rejected' && b.status !== 'expired' && b.status !== 'failed';
         break;
       case 'payment_verified':
         matchesTab = b.paymentStatus === 'paid' || Boolean(b.paymentVerified);
@@ -178,6 +201,9 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
         break;
       case 'rejected':
         matchesTab = b.status === 'rejected';
+        break;
+      case 'expired_failed':
+        matchesTab = b.status === 'expired' || b.status === 'failed';
         break;
       case 'refund_pending':
         matchesTab = b.refundStatus === 'pending';
@@ -234,6 +260,41 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
       setSelectedBooking(null);
     } catch (e: any) {
       setActionFeedback({ type: 'error', text: e.message || 'Failed to reject booking' });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleAdminCancelBooking = async (b: Booking) => {
+    setIsProcessing(true);
+    setActionFeedback(null);
+    try {
+      await cancelBookingByAdmin(b.id, adminEmail, 'Cancelled by administrator from Control Center');
+      setActionFeedback({
+        type: 'success',
+        text: `Reservation ${b.bookingReference} cancelled and room inventory lock released.`
+      });
+      onRefresh();
+      if (selectedBooking?.id === b.id) setSelectedBooking(null);
+    } catch (e: any) {
+      setActionFeedback({ type: 'error', text: e.message || 'Failed to cancel booking' });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleReleaseHold = async (hold: InventoryHold) => {
+    setIsProcessing(true);
+    setActionFeedback(null);
+    try {
+      await releaseHoldByAdmin(hold.id, adminEmail);
+      setActionFeedback({
+        type: 'success',
+        text: `Temporary hold ${hold.id} for ${hold.roomName || hold.roomId} released.`
+      });
+      onRefresh();
+    } catch (e: any) {
+      setActionFeedback({ type: 'error', text: e.message || 'Failed to release hold' });
     } finally {
       setIsProcessing(false);
     }
@@ -400,8 +461,11 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
     { id: 'cancellation_requests', label: '11. Cancellation Requests', count: getTabCount('cancellation_requests'), color: 'text-red-700' },
     { id: 'cancelled', label: '12. Cancelled', count: getTabCount('cancelled'), color: 'text-stone-500' },
     { id: 'rejected', label: '13. Rejected', count: getTabCount('rejected'), color: 'text-stone-500' },
-    { id: 'refund_pending', label: '14. Refund Pending', count: getTabCount('refund_pending'), color: 'text-amber-900' },
-    { id: 'completed', label: '15. Completed Stays', count: getTabCount('completed'), color: 'text-stone-600' }
+    { id: 'expired_failed', label: '14. Expired / Failed', count: getTabCount('expired_failed'), color: 'text-stone-500' },
+    { id: 'inventory_holds', label: '15. Inventory Holds', count: getTabCount('inventory_holds'), color: 'text-amber-700' },
+    { id: 'room_availability', label: '16. Room Availability', count: getTabCount('room_availability'), color: 'text-emerald-800' },
+    { id: 'refund_pending', label: '17. Refund Pending', count: getTabCount('refund_pending'), color: 'text-amber-900' },
+    { id: 'completed', label: '18. Completed Stays', count: getTabCount('completed'), color: 'text-stone-600' }
   ];
 
   return (
@@ -481,7 +545,142 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
         </div>
       </div>
 
+      {/* SPECIAL PANEL: INVENTORY HOLDS (ACTIVE & EXPIRED) */}
+      {activeTab === 'inventory_holds' && (
+        <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+          <div className="p-4 border-b border-stone-200 flex items-center justify-between bg-stone-50">
+            <div>
+              <h4 className="font-bold text-stone-900 text-sm">Temporary Booking Holds Monitor</h4>
+              <p className="text-[11px] text-stone-500">
+                Active 15-minute checkout locks and expired/released sessions. Expired holds never block availability.
+              </p>
+            </div>
+            <span className="text-xs font-bold text-amber-800 bg-amber-100 px-2.5 py-1 rounded-full">
+              {inventoryHolds.filter(h => h.status === 'held' && h.expiresAtMs > nowMs).length} Active Now
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-stone-50 text-stone-500 font-semibold border-b border-stone-200">
+                <tr>
+                  <th className="py-3 px-4">Hold ID</th>
+                  <th className="py-3 px-4">Room</th>
+                  <th className="py-3 px-4">Guest / Account</th>
+                  <th className="py-3 px-4">Dates Held</th>
+                  <th className="py-3 px-4">Status &amp; Expiry</th>
+                  <th className="py-3 px-4 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100">
+                {inventoryHolds.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="text-center py-10 text-stone-400">
+                      No inventory hold sessions recorded yet.
+                    </td>
+                  </tr>
+                ) : (
+                  inventoryHolds.map(h => {
+                    const isLiveActive = h.status === 'held' && h.expiresAtMs > nowMs;
+                    const displayStatus = h.status === 'held' && h.expiresAtMs <= nowMs ? 'expired' : h.status;
+                    const minsLeft = Math.max(0, Math.ceil((h.expiresAtMs - nowMs) / 60000));
+                    return (
+                      <tr key={h.id} className="hover:bg-stone-50/70">
+                        <td className="py-3 px-4 font-mono text-[11px] font-bold text-stone-800">{h.id}</td>
+                        <td className="py-3 px-4 font-semibold text-stone-900">{h.roomName || h.roomId}</td>
+                        <td className="py-3 px-4 text-stone-600">{h.guestEmail || h.userId}</td>
+                        <td className="py-3 px-4 font-medium text-stone-900">{h.checkInDate} → {h.checkOutDate}</td>
+                        <td className="py-3 px-4">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            isLiveActive ? 'bg-amber-100 text-amber-900' :
+                            displayStatus === 'converted' ? 'bg-emerald-100 text-emerald-800' :
+                            displayStatus === 'released' ? 'bg-stone-200 text-stone-700' :
+                            'bg-red-100 text-red-800'
+                          }`}>
+                            {displayStatus}
+                          </span>
+                          <span className="block text-[10px] text-stone-500 mt-0.5">
+                            {isLiveActive ? `Expires in ${minsLeft} min` : `Ended ${new Date(h.expiresAtMs || h.updatedAt || nowMs).toLocaleString()}`}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          {isLiveActive ? (
+                            <button
+                              type="button"
+                              onClick={() => handleReleaseHold(h)}
+                              disabled={isProcessing}
+                              className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white font-bold rounded text-[11px] cursor-pointer"
+                            >
+                              Release Hold
+                            </button>
+                          ) : (
+                            <span className="text-stone-400 text-[10px]">No lock active</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* SPECIAL PANEL: LIVE ROOM AVAILABILITY MATRIX */}
+      {activeTab === 'room_availability' && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-4 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-200 pb-3">
+            <div>
+              <h4 className="font-bold text-stone-900 text-sm">Room Availability Status (Tonight: {todayStr} → {tomorrowStr})</h4>
+              <p className="text-[11px] text-stone-500">
+                Real-time summary combining room operational status, active confirmed/pending bookings, and live holds.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {rooms.map(room => {
+              const slots = roomSlotsMap[room.id] || [];
+              const tonightEval = evaluateRoomAvailability({
+                slots,
+                checkInDate: todayStr,
+                checkOutDate: tomorrowStr,
+                room,
+                nowMs,
+              });
+              const activeBookingsCount = slots.filter(s => s.kind === 'booking').length;
+              const activeHoldsCount = slots.filter(s => s.kind === 'hold' && typeof s.expiresAtMs === 'number' && s.expiresAtMs > nowMs).length;
+              return (
+                <div key={room.id} className="p-3.5 rounded-xl border border-stone-200 bg-stone-50/70 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <span className="text-[10px] font-bold text-stone-500 uppercase">Room {room.roomNumber}</span>
+                      <h5 className="font-bold text-stone-900 text-sm">{room.name}</h5>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      tonightEval.available ? 'bg-emerald-100 text-emerald-800' :
+                      tonightEval.status === 'temporarily_held' ? 'bg-amber-100 text-amber-900' :
+                      'bg-red-100 text-red-800'
+                    }`}>
+                      {tonightEval.available ? 'Available' : tonightEval.status.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-stone-600 flex items-center justify-between">
+                    <span>Capacity: {room.totalCapacity} guests</span>
+                    <span className="font-bold text-stone-900">₹{room.specialPrice || room.basePrice}/night</span>
+                  </div>
+                  <div className="text-[10px] text-stone-500 flex items-center justify-between pt-1.5 border-t border-stone-200">
+                    <span>{activeBookingsCount} active booking(s)</span>
+                    <span>{activeHoldsCount} live hold(s)</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Bookings Table */}
+      {activeTab !== 'inventory_holds' && activeTab !== 'room_availability' && (
       <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
@@ -691,6 +890,17 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
                             Reject
                           </button>
                         )}
+
+                        {/* Admin Cancel Booking */}
+                        {!['cancelled', 'rejected', 'checked_out', 'completed', 'expired', 'failed'].includes(b.status) && (
+                          <button
+                            onClick={() => handleAdminCancelBooking(b)}
+                            disabled={isProcessing}
+                            className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 font-bold rounded text-[11px] cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -700,6 +910,7 @@ export const AdminBookingControlCenter: React.FC<AdminBookingControlCenterProps>
           </table>
         </div>
       </div>
+      )}
 
       {/* DETAILED BOOKING CONTROL MODAL */}
       {selectedBooking && !showRejectModal && !showProposeModal && !showNoteModal && !showMessageModal && (
