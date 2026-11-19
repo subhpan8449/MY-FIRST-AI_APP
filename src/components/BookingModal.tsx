@@ -1,7 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Room, Offer } from '../types';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Room, Offer, GameRewardVoucher } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { checkRoomAvailabilityDetailed, createBooking, getOffers } from '../services/db';
+import {
+  checkRoomAvailabilityDetailed,
+  createBooking,
+  getOffers,
+  getUserRewardVouchers,
+  markGameVoucherUsed
+} from '../services/db';
 import {
   addDaysToDateString,
   calculateNights,
@@ -9,6 +15,7 @@ import {
   validateBookingRequest,
   type AvailabilityCheckResult,
 } from '../utils/bookingAvailability';
+import { evaluatePromoCode, normalizePromoCode } from '../utils/promoPricing';
 import {
   calculateServerPrice,
   createInventoryHold,
@@ -41,6 +48,7 @@ import {
 import {
   getUserLoyaltySummary,
   calculatePointsToEarn,
+  calculateMaxLoyaltyRedemption,
   redeemPointsForBooking,
   LOYALTY_REWARD_OPTIONS,
   UserLoyaltySummary
@@ -55,6 +63,7 @@ interface BookingModalProps {
   initialCheckIn?: string;
   initialCheckOut?: string;
   initialGuests?: number;
+  initialPromoCode?: string;
   onBookingSuccess: (bookingRef: string) => void;
 }
 
@@ -66,9 +75,10 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   initialCheckIn,
   initialCheckOut,
   initialGuests = 2,
+  initialPromoCode = '',
   onBookingSuccess,
 }) => {
-  const { currentUser, userProfile, loginWithGoogle } = useAuth();
+  const { currentUser, userProfile, loginWithGoogle, refreshProfile } = useAuth();
 
   const todayDateStr = getTodayDateString();
   const defaultCheckIn = initialCheckIn && initialCheckIn >= todayDateStr ? initialCheckIn : addDaysToDateString(todayDateStr, 1);
@@ -87,11 +97,12 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   const [idNumber, setIdNumber] = useState<string>('');
   const [specialRequests, setSpecialRequests] = useState<string>('');
 
-  // Promo Code
-  const [promoCode, setPromoCode] = useState<string>('');
-  const [appliedPromo, setAppliedPromo] = useState<{ code: string; name: string; discount: number } | null>(null);
+  // Promo Code & Vouchers
+  const [promoCode, setPromoCode] = useState<string>(normalizePromoCode(initialPromoCode));
+  const [appliedPromo, setAppliedPromo] = useState<{ code: string; name: string; discount: number; source?: string; voucherId?: string } | null>(null);
   const [promoError, setPromoError] = useState<string>('');
   const [availableOffers, setAvailableOffers] = useState<Offer[]>([]);
+  const [userVouchers, setUserVouchers] = useState<GameRewardVoucher[]>([]);
 
   // Payment configuration & methods
   const [paymentConfig, setPaymentConfig] = useState<PaymentConfig>({
@@ -160,16 +171,27 @@ export const BookingModal: React.FC<BookingModalProps> = ({
     }
   }, [userProfile]);
 
-  // Load user loyalty profile
+  // Load user loyalty profile & persisted game vouchers
   useEffect(() => {
     if (currentUser?.uid) {
       getUserLoyaltySummary(currentUser.uid).then(setUserLoyalty).catch(console.error);
+      getUserRewardVouchers(currentUser.uid)
+        .then(vs => setUserVouchers(vs.filter(v => !v.isUsed && v.status === 'active')))
+        .catch(console.error);
     } else {
       setUserLoyalty(null);
+      setUserVouchers([]);
       setRedeemPoints(0);
       setLoyaltyDiscount(0);
     }
   }, [currentUser]);
+
+  // Sync initialPromoCode prop if opened from OffersSection or Arcade
+  useEffect(() => {
+    if (initialPromoCode) {
+      setPromoCode(normalizePromoCode(initialPromoCode));
+    }
+  }, [initialPromoCode]);
 
   // Load payment config & active offers
   useEffect(() => {
@@ -178,7 +200,8 @@ export const BookingModal: React.FC<BookingModalProps> = ({
   }, []);
 
   const currentRoom = rooms.find(r => r.id === roomId) || selectedRoom || rooms[0];
-  const payableTotal = Math.max(0, finalTotal - loyaltyDiscount);
+  const clampedLoyaltyDiscount = Math.min(loyaltyDiscount, finalTotal);
+  const payableTotal = Math.max(0, finalTotal - clampedLoyaltyDiscount);
   const pointsToEarn = calculatePointsToEarn(payableTotal, userLoyalty?.tier || 'explorer');
   const smartMatch = currentRoom ? computeSmartMatch(currentRoom, 'all', { adults, children: childrenCount }) : null;
 
@@ -284,11 +307,11 @@ export const BookingModal: React.FC<BookingModalProps> = ({
     return () => clearInterval(timer);
   }, [isOpen, currentStep, holdExpiresAt, currentHoldId, currentRoom?.id]);
 
-  // Recalculate server price whenever room, dates, or promo changes
-  const runPriceCalculation = async () => {
+  // Recalculate server price whenever room, dates, offers, vouchers, or explicit promo changes
+  const runPriceCalculation = useCallback(async (overridePromoCode?: string) => {
     if (!currentRoom) return;
-    const validDates = calculateNights(checkInDate, checkOutDate) >= 1;
-    if (!validDates) {
+    const calcNights = calculateNights(checkInDate, checkOutDate);
+    if (calcNights < 1) {
       setNights(0);
       setRoomSubtotal(0);
       setDiscountAmount(0);
@@ -296,51 +319,87 @@ export const BookingModal: React.FC<BookingModalProps> = ({
       return;
     }
 
+    const activeCode = normalizePromoCode(overridePromoCode !== undefined ? overridePromoCode : promoCode);
+    const rate = currentRoom.specialPrice || currentRoom.basePrice || 999;
+    const localSubtotal = Math.round(rate * calcNights);
+
+    const matchedOffer = activeCode
+      ? availableOffers.find(o => normalizePromoCode(o.code) === activeCode) || null
+      : null;
+    const matchedVoucher = activeCode
+      ? userVouchers.find(v => normalizePromoCode(v.code || v.voucherCode) === activeCode) || null
+      : null;
+
     setIsCalculating(true);
     try {
-      const basePrice = currentRoom.specialPrice || currentRoom.basePrice || 999;
       const res = await calculateServerPrice({
-        basePrice,
+        basePrice: rate,
         checkInDate,
         checkOutDate,
-        promoCode: promoCode.trim().toUpperCase()
+        promoCode: activeCode,
+        offerDefinition: matchedOffer,
+        voucherDefinition: matchedVoucher
       });
       setNights(res.nights);
       setRoomSubtotal(res.roomSubtotal);
       setDiscountAmount(res.discountAmount);
       setFinalTotal(res.finalTotal);
       if (res.appliedPromo) {
-        setAppliedPromo(res.appliedPromo);
+        setAppliedPromo({
+          ...res.appliedPromo,
+          voucherId: matchedVoucher?.id
+        });
         setPromoError('');
-      } else if (promoCode.trim()) {
+      } else if (activeCode) {
         setAppliedPromo(null);
-        setPromoError('Coupon code not applicable for this stay');
+        setPromoError(res.promoError || `Promo code "${activeCode}" is not applicable for this stay.`);
       } else {
         setAppliedPromo(null);
         setPromoError('');
       }
     } catch (err: any) {
-      console.warn('Server price calculation fallback:', err);
-      const calcNights = Math.max(1, calculateNights(checkInDate, checkOutDate));
-      const rate = currentRoom.specialPrice || currentRoom.basePrice || 999;
+      console.warn('Server price calculation fallback to local evaluator:', err);
+      const localEval = evaluatePromoCode({
+        promoCode: activeCode,
+        nights: calcNights,
+        roomSubtotal: localSubtotal,
+        availableOffers,
+        userVouchers
+      });
       setNights(calcNights);
-      setRoomSubtotal(rate * calcNights);
-      setFinalTotal(rate * calcNights);
+      setRoomSubtotal(localSubtotal);
+      setDiscountAmount(localEval.discountAmount);
+      setFinalTotal(Math.max(0, localSubtotal - localEval.discountAmount));
+      setAppliedPromo(localEval.appliedPromo);
+      setPromoError(localEval.promoError || '');
     } finally {
       setIsCalculating(false);
     }
-  };
+  }, [currentRoom, checkInDate, checkOutDate, promoCode, availableOffers, userVouchers]);
 
   useEffect(() => {
     if (isOpen && currentRoom && checkInDate && checkOutDate) {
       runPriceCalculation();
     }
-  }, [isOpen, roomId, checkInDate, checkOutDate]);
+  }, [isOpen, roomId, checkInDate, checkOutDate, availableOffers.length, userVouchers.length]);
 
   if (!isOpen) return null;
 
-  const handleApplyPromoBtn = () => {
-    runPriceCalculation();
+  const handleApplyPromoBtn = (codeOverride?: string) => {
+    if (codeOverride !== undefined) {
+      const normalized = normalizePromoCode(codeOverride);
+      setPromoCode(normalized);
+      runPriceCalculation(normalized);
+    } else {
+      runPriceCalculation(promoCode);
+    }
+  };
+
+  const handleClearPromo = () => {
+    setPromoCode('');
+    setAppliedPromo(null);
+    setPromoError('');
+    runPriceCalculation('');
   };
 
   const handleProceedToGuestDetails = async (e: React.FormEvent) => {
@@ -541,10 +600,10 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                   nights,
                   basePricePerNight: currentRoom.specialPrice || currentRoom.basePrice,
                   roomSubtotal,
-                  discountApplied: discountAmount + loyaltyDiscount,
+                  discountApplied: discountAmount + clampedLoyaltyDiscount,
                   offerCode: appliedPromo?.code || '',
                   loyaltyPointsRedeemed: redeemPoints,
-                  loyaltyDiscountAmount: loyaltyDiscount,
+                  loyaltyDiscountAmount: clampedLoyaltyDiscount,
                   loyaltyPointsEarned: pointsToEarn,
                   loyaltyPointsAwarded: false,
                   totalAmount: payableTotal,
@@ -559,7 +618,11 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                 });
 
                 if (redeemPoints > 0) {
-                  await redeemPointsForBooking(currentUser.uid, redeemPoints, loyaltyDiscount, bookingResult.bookingReference);
+                  await redeemPointsForBooking(currentUser.uid, redeemPoints, clampedLoyaltyDiscount, bookingResult.bookingReference);
+                  refreshProfile().catch(() => {});
+                }
+                if (appliedPromo?.voucherId) {
+                  await markGameVoucherUsed(appliedPromo.voucherId, bookingResult.bookingReference);
                 }
 
                 setCurrentHoldId(null);
@@ -607,10 +670,10 @@ export const BookingModal: React.FC<BookingModalProps> = ({
           nights,
           basePricePerNight: currentRoom.specialPrice || currentRoom.basePrice,
           roomSubtotal,
-          discountApplied: discountAmount + loyaltyDiscount,
+          discountApplied: discountAmount + clampedLoyaltyDiscount,
           offerCode: appliedPromo?.code || '',
           loyaltyPointsRedeemed: redeemPoints,
-          loyaltyDiscountAmount: loyaltyDiscount,
+          loyaltyDiscountAmount: clampedLoyaltyDiscount,
           loyaltyPointsEarned: pointsToEarn,
           loyaltyPointsAwarded: false,
           totalAmount: payableTotal,
@@ -622,7 +685,11 @@ export const BookingModal: React.FC<BookingModalProps> = ({
         });
 
         if (redeemPoints > 0) {
-          await redeemPointsForBooking(currentUser.uid, redeemPoints, loyaltyDiscount, bookingResult.bookingReference);
+          await redeemPointsForBooking(currentUser.uid, redeemPoints, clampedLoyaltyDiscount, bookingResult.bookingReference);
+          refreshProfile().catch(() => {});
+        }
+        if (appliedPromo?.voucherId) {
+          await markGameVoucherUsed(appliedPromo.voucherId, bookingResult.bookingReference);
         }
 
         setCurrentHoldId(null);
@@ -895,39 +962,39 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                   <span>-₹{discountAmount}</span>
                 </div>
               )}
-              {loyaltyDiscount > 0 && (
+              {clampedLoyaltyDiscount > 0 && (
                 <div className="flex justify-between text-emerald-700 font-semibold">
-                  <span>Sunlit Rewards Redemption ({redeemPoints} Pts):</span>
-                  <span>-₹{loyaltyDiscount}</span>
+                  <span>Sunlit Rewards + Game Points ({redeemPoints} Pts):</span>
+                  <span>-₹{clampedLoyaltyDiscount}</span>
                 </div>
               )}
               <div className="pt-2 border-t border-stone-200 flex justify-between items-baseline text-sm">
                 <div>
                   <span className="font-bold text-stone-900">Total Due:</span>
                   <span className="block text-[11px] text-amber-800 font-bold mt-0.5">
-                    🪙 You earn +{pointsToEarn} Sunlit Points
+                    🪙 You earn +{pointsToEarn} Sunlit Points on completion
                   </span>
                 </div>
                 <span className="text-xl font-extrabold text-amber-950">₹{payableTotal}</span>
               </div>
             </div>
 
-            {/* Loyalty Rewards Points Redemption (Sunlit Rewards Club) */}
-            {userLoyalty && userLoyalty.points >= 100 && (
+            {/* Unified Loyalty & Arcade Game Points Redemption (Sunlit Rewards Club) */}
+            {userLoyalty && userLoyalty.points >= 20 && (
               <div className="p-4 bg-amber-50/70 rounded-xl border border-amber-200/80 text-xs space-y-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 font-bold text-amber-950">
                     <Award className="w-4 h-4 text-amber-700" />
-                    <span>Sunlit Rewards Club ({userLoyalty.tierInfo.name})</span>
+                    <span>Sunlit Rewards &amp; Arcade Points ({userLoyalty.tierInfo.name})</span>
                   </div>
-                  <span className="text-[11px] font-mono font-bold bg-white text-amber-900 px-2 py-0.5 rounded border border-amber-300">
-                    Balance: {userLoyalty.points} Pts
+                  <span className="text-[11px] font-mono font-bold bg-white text-amber-900 px-2 py-0.5 rounded border border-amber-300 tabular-nums">
+                    Balance: {userLoyalty.points} Pts (= ₹{Math.floor(userLoyalty.points * 0.5)})
                   </span>
                 </div>
                 <p className="text-[11px] text-stone-600">
-                  Redeem your member loyalty points for an instant booking discount:
+                  Your stay rewards and Play &amp; Earn game points are combined here — redeem them for an instant discount (2 pts = ₹1):
                 </p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5">
                   <button
                     type="button"
                     onClick={() => {
@@ -940,16 +1007,42 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                         : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
                     }`}
                   >
-                    <span className="block font-bold text-[11px]">No Points</span>
-                    <span className="text-[10px] opacity-75">Pay standard</span>
+                    <span className="block font-bold text-[11px]">Save Points</span>
+                    <span className="text-[10px] opacity-75">Use ₹0 now</span>
                   </button>
+
+                  {(() => {
+                    const maxRedeem = calculateMaxLoyaltyRedemption(userLoyalty.points, finalTotal);
+                    if (maxRedeem.discountRupees <= 0) return null;
+                    const isSelected = redeemPoints === maxRedeem.pointsToUse && loyaltyDiscount === maxRedeem.discountRupees;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRedeemPoints(maxRedeem.pointsToUse);
+                          setLoyaltyDiscount(maxRedeem.discountRupees);
+                        }}
+                        className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
+                          isSelected
+                            ? 'bg-emerald-700 text-white border-emerald-800 shadow-2xs'
+                            : 'bg-emerald-50 text-emerald-950 border-emerald-300 hover:bg-emerald-100'
+                        }`}
+                      >
+                        <span className="block font-bold text-[11px]">Use Max ({maxRedeem.pointsToUse} Pts)</span>
+                        <span className={`text-[10px] font-bold block ${isSelected ? 'text-emerald-100' : 'text-emerald-700'}`}>
+                          Save ₹{maxRedeem.discountRupees} instantly
+                        </span>
+                      </button>
+                    );
+                  })()}
+
                   {LOYALTY_REWARD_OPTIONS.filter(o => o.pointsRequired <= userLoyalty.points).map((opt) => (
                     <button
                       key={opt.id}
                       type="button"
                       onClick={() => {
                         setRedeemPoints(opt.pointsRequired);
-                        setLoyaltyDiscount(opt.discountValue);
+                        setLoyaltyDiscount(Math.min(opt.discountValue, finalTotal));
                       }}
                       className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
                         redeemPoints === opt.pointsRequired
@@ -959,7 +1052,7 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                     >
                       <span className="block font-bold text-[11px]">Use {opt.pointsRequired} Pts</span>
                       <span className={`text-[10px] font-bold block ${redeemPoints === opt.pointsRequired ? 'text-amber-200' : 'text-emerald-700'}`}>
-                        Save ₹{opt.discountValue}
+                        Save ₹{Math.min(opt.discountValue, finalTotal)}
                       </span>
                     </button>
                   ))}
@@ -1108,7 +1201,7 @@ export const BookingModal: React.FC<BookingModalProps> = ({
               </div>
               <div className="text-right">
                 <span className="text-[10px] text-stone-500 uppercase block">Total Due</span>
-                <span className="text-sm font-black text-amber-950">₹{finalTotal}</span>
+                <span className="text-sm font-black text-amber-950">₹{payableTotal}</span>
               </div>
             </div>
 
@@ -1283,8 +1376,6 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                 value={roomId}
                 onChange={(e) => {
                   setRoomId(e.target.value);
-                  setPromoCode('');
-                  setAppliedPromo(null);
                 }}
                 className="w-full px-3 py-2 text-xs bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600 font-medium"
                 required
@@ -1363,36 +1454,175 @@ export const BookingModal: React.FC<BookingModalProps> = ({
               </div>
             </div>
 
-            {/* Promo Code & Discounts */}
-            <div className="pt-2 border-t border-stone-100">
-              <label className="block text-xs font-bold text-stone-700 mb-1 flex items-center gap-1.5">
+            {/* Promo Code, Active Offers & Arcade Vouchers */}
+            <div className="pt-2 border-t border-stone-100 space-y-2">
+              <label className="block text-xs font-bold text-stone-700 flex items-center gap-1.5">
                 <Tag className="w-3.5 h-3.5 text-amber-700" />
-                <span>Apply Promo Code (e.g. STUDENT500, LONGSTAY20, SUNLITCOUPLE, PILGRIM10)</span>
+                <span>Promo Code or Arcade Reward Voucher</span>
               </label>
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={promoCode}
-                  onChange={(e) => setPromoCode(e.target.value)}
-                  placeholder="Enter promo code"
-                  className="flex-1 px-3 py-1.5 text-xs uppercase bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
+                  onChange={(e) => setPromoCode(e.target.value.toUpperCase())}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleApplyPromoBtn();
+                    }
+                  }}
+                  placeholder="Enter code (e.g. STUDENT500, PILGRIM10)"
+                  className="flex-1 px-3 py-1.5 text-xs uppercase font-mono bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-600"
                 />
                 <button
                   type="button"
-                  onClick={handleApplyPromoBtn}
-                  className="px-4 py-1.5 text-xs font-bold text-stone-800 bg-stone-100 hover:bg-stone-200 border border-stone-300 rounded-lg cursor-pointer"
+                  onClick={() => handleApplyPromoBtn()}
+                  disabled={isCalculating}
+                  className="px-4 py-1.5 text-xs font-bold text-white bg-amber-800 hover:bg-amber-900 disabled:bg-stone-300 rounded-lg cursor-pointer transition"
                 >
-                  Apply Code
+                  {isCalculating ? '...' : 'Apply Code'}
                 </button>
+                {appliedPromo && (
+                  <button
+                    type="button"
+                    onClick={handleClearPromo}
+                    className="px-2.5 py-1.5 text-xs font-bold text-stone-600 bg-stone-100 hover:bg-stone-200 border border-stone-300 rounded-lg cursor-pointer"
+                  >
+                    Remove
+                  </button>
+                )}
               </div>
 
-              {promoError && <p className="text-[11px] text-red-600 mt-1">{promoError}</p>}
+              {/* Quick-Apply Offer & Voucher Chips */}
+              <div className="flex flex-wrap gap-1.5">
+                {(availableOffers.length > 0
+                  ? availableOffers
+                  : [
+                      { id: 'b1', code: 'STUDENT500', discountType: 'fixed' as const, discountValue: 500, minStay: 1 },
+                      { id: 'b2', code: 'PILGRIM10', discountType: 'percentage' as const, discountValue: 10, minStay: 1 },
+                      { id: 'b3', code: 'SUNLITCOUPLE', discountType: 'percentage' as const, discountValue: 12, minStay: 2 },
+                      { id: 'b4', code: 'LONGSTAY20', discountType: 'percentage' as const, discountValue: 20, minStay: 7 }
+                    ]
+                ).map((off) => {
+                  const isActiveCode = appliedPromo?.code === normalizePromoCode(off.code);
+                  return (
+                    <button
+                      key={off.id}
+                      type="button"
+                      onClick={() => handleApplyPromoBtn(off.code)}
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold border transition cursor-pointer flex items-center gap-1 ${
+                        isActiveCode
+                          ? 'bg-emerald-700 text-white border-emerald-800'
+                          : 'bg-amber-50/80 text-amber-950 border-amber-200 hover:bg-amber-100'
+                      }`}
+                    >
+                      <span className="font-mono">{off.code}</span>
+                      <span className="opacity-80">
+                        ({off.discountType === 'fixed' ? `₹${off.discountValue} off` : `${off.discountValue}% off`}
+                        {off.minStay > 1 ? ` · ${off.minStay}+N` : ''})
+                      </span>
+                    </button>
+                  );
+                })}
+                {userVouchers.map((v) => {
+                  const vCode = normalizePromoCode(v.code || v.voucherCode);
+                  const isActiveCode = appliedPromo?.code === vCode;
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      onClick={() => handleApplyPromoBtn(vCode)}
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold border transition cursor-pointer flex items-center gap-1 ${
+                        isActiveCode
+                          ? 'bg-emerald-700 text-white border-emerald-800'
+                          : 'bg-purple-50 text-purple-900 border-purple-200 hover:bg-purple-100'
+                      }`}
+                    >
+                      <Gift className="w-3 h-3" />
+                      <span className="font-mono">{vCode}</span>
+                      <span>(-₹{v.discountAmount})</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {promoError && (
+                <p className="text-[11px] text-red-600 font-medium flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{promoError}</span>
+                </p>
+              )}
               {appliedPromo && (
-                <p className="text-[11px] text-emerald-700 mt-1 font-bold">
-                  ✓ {appliedPromo.name} applied: ₹{appliedPromo.discount} savings!
+                <p className="text-[11px] text-emerald-700 font-bold flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{appliedPromo.name} applied: ₹{appliedPromo.discount} instant savings!</span>
                 </p>
               )}
             </div>
+
+            {/* Unified Sunlit Rewards & Arcade Game Points Instant Redemption in Step 2 */}
+            {userLoyalty && userLoyalty.points >= 20 && (
+              <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200/80 text-xs space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-amber-950 flex items-center gap-1.5">
+                    <Award className="w-4 h-4 text-amber-700" />
+                    <span>Use Sunlit Rewards + Game Points ({userLoyalty.points} pts = ₹{Math.floor(userLoyalty.points * 0.5)})</span>
+                  </span>
+                  {redeemPoints > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRedeemPoints(0);
+                        setLoyaltyDiscount(0);
+                      }}
+                      className="text-[10px] font-bold text-stone-600 hover:text-stone-900 underline cursor-pointer"
+                    >
+                      Clear Points
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(() => {
+                    const maxRedeem = calculateMaxLoyaltyRedemption(userLoyalty.points, finalTotal);
+                    if (maxRedeem.discountRupees <= 0) return null;
+                    const isSelected = redeemPoints === maxRedeem.pointsToUse && loyaltyDiscount === maxRedeem.discountRupees;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRedeemPoints(maxRedeem.pointsToUse);
+                          setLoyaltyDiscount(maxRedeem.discountRupees);
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-emerald-700 text-white border-emerald-800'
+                            : 'bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-50'
+                        }`}
+                      >
+                        Use Max: {maxRedeem.pointsToUse} pts (-₹{maxRedeem.discountRupees})
+                      </button>
+                    );
+                  })()}
+                  {LOYALTY_REWARD_OPTIONS.filter(o => o.pointsRequired <= userLoyalty.points).slice(0, 3).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setRedeemPoints(opt.pointsRequired);
+                        setLoyaltyDiscount(Math.min(opt.discountValue, finalTotal));
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                        redeemPoints === opt.pointsRequired
+                          ? 'bg-amber-800 text-white border-amber-900'
+                          : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
+                      }`}
+                    >
+                      {opt.pointsRequired} pts (-₹{Math.min(opt.discountValue, finalTotal)})
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Transparent Server Price Breakdown */}
             <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 space-y-1.5 text-xs">
@@ -1406,6 +1636,12 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                   <span className="tabular-nums">-₹{discountAmount}</span>
                 </div>
               )}
+              {clampedLoyaltyDiscount > 0 && (
+                <div className="flex justify-between text-emerald-700 font-bold">
+                  <span>Sunlit Rewards &amp; Game Points ({redeemPoints} pts)</span>
+                  <span className="tabular-nums">-₹{clampedLoyaltyDiscount}</span>
+                </div>
+              )}
               <div className="flex justify-between text-stone-600">
                 <span>Swimming Pool & Kids Play Area</span>
                 <span className="text-emerald-700 font-bold">Included (₹0)</span>
@@ -1413,7 +1649,7 @@ export const BookingModal: React.FC<BookingModalProps> = ({
               <div className="pt-2 border-t border-stone-200 flex justify-between items-baseline text-sm">
                 <span className="font-bold text-stone-900">Total Payable</span>
                 <span className="text-xl font-extrabold text-amber-950 tabular-nums">
-                  {isCalculating ? 'Calculating...' : `₹${finalTotal}`}
+                  {isCalculating ? 'Calculating...' : `₹${payableTotal}`}
                 </span>
               </div>
             </div>

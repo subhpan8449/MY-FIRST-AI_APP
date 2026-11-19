@@ -438,7 +438,7 @@ const INITIAL_OFFERS: Omit<Offer, 'id'>[] = [
     discountValue: 500,
     minStay: 1,
     maxDiscount: 500,
-    eligibleCategories: ['Budget Studio', 'Standard Room', 'Budget Economy'],
+    eligibleCategories: ['All Rooms'],
     requiresIdVerification: true,
     isActive: true,
     description: 'Get an instant ₹500 flat discount per booking. Valid student ID required upon check-in.'
@@ -450,7 +450,7 @@ const INITIAL_OFFERS: Omit<Offer, 'id'>[] = [
     discountValue: 20,
     minStay: 7,
     maxDiscount: 5000,
-    eligibleCategories: ['Deluxe Balcony', 'City View Deluxe', 'Long-Stay Suite', 'Family Suite'],
+    eligibleCategories: ['All Rooms'],
     requiresIdVerification: false,
     isActive: true,
     description: 'Enjoy 20% off your entire stay for bookings of 7 nights or longer. Great for yoga practitioners.'
@@ -462,7 +462,7 @@ const INITIAL_OFFERS: Omit<Offer, 'id'>[] = [
     discountValue: 12,
     minStay: 2,
     maxDiscount: 1000,
-    eligibleCategories: ['Deluxe Balcony', 'City View Deluxe', 'City View Premium'],
+    eligibleCategories: ['All Rooms'],
     requiresIdVerification: false,
     isActive: true,
     description: '12% discount for 2+ nights stay in our sunlit balcony and city view rooms.'
@@ -474,7 +474,7 @@ const INITIAL_OFFERS: Omit<Offer, 'id'>[] = [
     discountValue: 10,
     minStay: 1,
     maxDiscount: 800,
-    eligibleCategories: ['Standard Room', 'Family Suite', 'Budget Studio'],
+    eligibleCategories: ['All Rooms'],
     requiresIdVerification: true,
     isActive: true,
     description: '10% discount for registered pilgrims and senior citizens visiting holy shrines in Uttarakhand.'
@@ -2359,6 +2359,22 @@ export async function createRewardVoucher(
     return res.id;
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, 'gameVouchers');
+  }
+}
+
+export async function markGameVoucherUsed(
+  voucherId: string,
+  bookingReference: string
+): Promise<void> {
+  if (!voucherId) return;
+  try {
+    await updateDoc(doc(db, 'gameVouchers', voucherId), {
+      status: 'used',
+      isUsed: true,
+      usedInBookingReference: bookingReference
+    });
+  } catch (error) {
+    console.warn('Could not mark game voucher as used:', error);
   }
 }
 

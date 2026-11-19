@@ -67,6 +67,7 @@ const MainAppContent: React.FC = () => {
 
   // Modals state
   const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
+  const [selectedPromoCode, setSelectedPromoCode] = useState<string>('');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authInitialType, setAuthInitialType] = useState<'customer' | 'admin'>('customer');
   const [isAdminPortalOpen, setIsAdminPortalOpen] = useState(false);
@@ -138,10 +139,15 @@ const MainAppContent: React.FC = () => {
 
   const handleBookRoom = (room: Room) => {
     setSelectedRoomForBooking(room);
+    setSelectedPromoCode('');
     setIsBookingModalOpen(true);
   };
 
   const handleSelectOffer = (code: string) => {
+    setSelectedPromoCode(code.trim().toUpperCase());
+    if (!selectedRoomForBooking && rooms.length > 0) {
+      setSelectedRoomForBooking(rooms[0]);
+    }
     setIsBookingModalOpen(true);
   };
 
@@ -616,12 +622,16 @@ const MainAppContent: React.FC = () => {
       {isBookingModalOpen && (
         <BookingModal
           isOpen={isBookingModalOpen}
-          onClose={() => setIsBookingModalOpen(false)}
-          selectedRoom={selectedRoomForBooking}
+          onClose={() => {
+            setIsBookingModalOpen(false);
+            setSelectedPromoCode('');
+          }}
+          selectedRoom={selectedRoomForBooking || rooms[0] || null}
           rooms={rooms}
           initialCheckIn={searchFilters.checkInDate}
           initialCheckOut={searchFilters.checkOutDate}
           initialGuests={searchFilters.adults + searchFilters.children}
+          initialPromoCode={selectedPromoCode}
           onBookingSuccess={(_ref) => {
             refreshRooms();
           }}
@@ -776,7 +786,12 @@ const MainAppContent: React.FC = () => {
         <SunlitPlayAndEarn
           isOpen={isPlayAndEarnOpen}
           onClose={() => setIsPlayAndEarnOpen(false)}
-          onSelectVoucherForBooking={(_code) => {
+          onSelectVoucherForBooking={(code) => {
+            setIsPlayAndEarnOpen(false);
+            setSelectedPromoCode(code ? code.trim().toUpperCase() : '');
+            if (!selectedRoomForBooking && rooms.length > 0) {
+              setSelectedRoomForBooking(rooms[0]);
+            }
             setIsBookingModalOpen(true);
           }}
         />

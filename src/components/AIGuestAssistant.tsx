@@ -8,7 +8,8 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { GroundingSource } from '../types';
-import { getLiveHomestayContextSnapshot } from '../services/aiContextService';
+import { useAuth } from '../context/AuthContext';
+import { getLiveHomestayContextSnapshot, getGuestContextSnapshot } from '../services/aiContextService';
 import { renderRichAiMessage } from '../utils/formatAiText';
 
 interface ChatMessage {
@@ -17,6 +18,7 @@ interface ChatMessage {
   text: string;
   timestamp: string;
   sources?: GroundingSource[];
+  notice?: string;
 }
 
 const QUICK_PROMPTS = [
@@ -28,6 +30,7 @@ const QUICK_PROMPTS = [
 ];
 
 export const AIGuestAssistant: React.FC = () => {
+  const { currentUser, userProfile } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -65,14 +68,18 @@ export const AIGuestAssistant: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const homestayContext = await getLiveHomestayContextSnapshot();
+      const [homestayContext, guestContext] = await Promise.all([
+        getLiveHomestayContextSnapshot(),
+        getGuestContextSnapshot(currentUser?.uid, userProfile)
+      ]);
       const res = await fetch('/api/ai/assistant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: question,
           history: currentHistory.slice(-10).map(m => ({ sender: m.sender, text: m.text })),
-          homestayContext
+          homestayContext,
+          guestContext
         })
       });
 
@@ -86,7 +93,8 @@ export const AIGuestAssistant: React.FC = () => {
         sender: 'assistant',
         text: replyText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        sources: Array.isArray(data.sources) ? data.sources : []
+        sources: Array.isArray(data.sources) ? data.sources : [],
+        notice: typeof data.aiNotice === 'string' ? data.aiNotice : undefined
       };
 
       setMessages(prev => [...prev, assistantMsg]);
@@ -180,6 +188,11 @@ export const AIGuestAssistant: React.FC = () => {
                         </a>
                       ))}
                     </div>
+                  )}
+                  {msg.sender === 'assistant' && msg.notice && (
+                    <p className="mt-2 pt-1.5 border-t border-amber-100 text-[10px] text-amber-700/90 leading-snug">
+                      {msg.notice}
+                    </p>
                   )}
                   <span
                     className={`block text-[9px] mt-1 ${

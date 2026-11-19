@@ -3,6 +3,8 @@ import {
   releaseInventoryHoldRecord,
 } from './db';
 
+import { Offer, GameRewardVoucher } from '../types';
+
 export interface PriceCalculationResult {
   success: boolean;
   nights: number;
@@ -13,7 +15,9 @@ export interface PriceCalculationResult {
     code: string;
     name: string;
     discount: number;
+    source?: string;
   } | null;
+  promoError?: string | null;
   finalTotal: number;
   includesPoolAndPlayArea: boolean;
 }
@@ -44,6 +48,8 @@ export async function calculateServerPrice(params: {
   checkInDate: string;
   checkOutDate: string;
   promoCode?: string;
+  offerDefinition?: Offer | null;
+  voucherDefinition?: GameRewardVoucher | null;
 }): Promise<PriceCalculationResult> {
   const res = await fetch('/api/pricing/calculate', {
     method: 'POST',

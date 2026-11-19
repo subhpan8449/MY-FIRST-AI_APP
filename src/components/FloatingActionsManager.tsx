@@ -28,6 +28,7 @@ interface AIChatMessage {
   timestamp: string;
   sources?: GroundingSource[];
   grounded?: boolean;
+  notice?: string;
 }
 
 const AI_SUGGESTED_QUESTIONS = [
@@ -129,7 +130,8 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
         text: replyText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         sources: Array.isArray(data.sources) ? data.sources : [],
-        grounded: Boolean(data.grounded)
+        grounded: Boolean(data.grounded),
+        notice: typeof data.aiNotice === 'string' ? data.aiNotice : undefined
       };
 
       setAiMessages(prev => [...prev, assistantMsg]);
@@ -326,6 +328,12 @@ export const FloatingActionsManager: React.FC<FloatingActionsManagerProps> = ({
                         </a>
                       ))}
                     </div>
+                  )}
+
+                  {msg.sender === 'assistant' && msg.notice && (
+                    <p className="mt-2 pt-1.5 border-t border-amber-100 text-[10px] text-amber-700/90 leading-snug">
+                      {msg.notice}
+                    </p>
                   )}
 
                   <span

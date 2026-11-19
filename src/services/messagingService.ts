@@ -17,7 +17,7 @@ import { sanitizeForFirestore } from './db';
 import { getLiveHomestayContextSnapshot, getGuestContextSnapshot } from './aiContextService';
 
 export const MessagingService = {
-  // Find or create customer support conversation
+  // Find or create customer support conversation (single-field query avoids missing composite index errors)
   async getOrCreateConversation(
     user: { uid: string; fullName: string; email: string; phone?: string },
     topic: SupportTopic,
@@ -25,24 +25,34 @@ export const MessagingService = {
     roomNumber?: string
   ): Promise<string> {
     try {
-      // Check existing active conversation for this customer
       const q = query(
         collection(db, 'conversations'),
-        where('customerId', '==', user.uid),
-        where('status', 'in', ['unread', 'pending'])
+        where('customerId', '==', user.uid)
       );
       const snap = await getDocs(q);
 
-      if (!snap.empty) {
-        const existingDoc = snap.docs[0];
+      const activeDocs = snap.docs
+        .filter((d) => {
+          const st = d.data()?.status;
+          return st === 'unread' || st === 'pending';
+        })
+        .sort((a, b) => {
+          const ta = new Date(a.data()?.lastMessageAt || a.data()?.createdAt || 0).getTime();
+          const tb = new Date(b.data()?.lastMessageAt || b.data()?.createdAt || 0).getTime();
+          return tb - ta;
+        });
+
+      if (activeDocs.length > 0) {
+        const existingDoc = activeDocs[0];
         if (topic && topic !== existingDoc.data().topic) {
-          await updateDoc(existingDoc.ref, { topic, updatedAt: new Date().toISOString() });
+          await updateDoc(existingDoc.ref, { topic, updatedAt: new Date().toISOString() }).catch(() => {});
         }
         return existingDoc.id;
       }
 
       // Create new conversation
       const convRef = doc(collection(db, 'conversations'));
+      const nowIso = new Date().toISOString();
       const newConv: Omit<SupportConversation, 'id'> = {
         customerId: user.uid,
         customerName: user.fullName || 'Guest',
@@ -54,11 +64,11 @@ export const MessagingService = {
         bookingReference: bookingReference || '',
         roomNumber: roomNumber || '',
         lastMessage: 'Conversation started',
-        lastMessageAt: new Date().toISOString(),
+        lastMessageAt: nowIso,
         unreadCountAdmin: 0,
         unreadCountCustomer: 0,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+        createdAt: nowIso,
+        updatedAt: nowIso
       };
 
       await setDoc(convRef, sanitizeForFirestore(newConv));
@@ -66,6 +76,18 @@ export const MessagingService = {
     } catch (err) {
       console.error('getOrCreateConversation error:', err);
       throw err;
+    }
+  },
+
+  // Update topic in-place without re-creating or re-subscribing to the conversation
+  async updateConversationTopic(conversationId: string, topic: SupportTopic): Promise<void> {
+    try {
+      await updateDoc(doc(db, 'conversations', conversationId), {
+        topic,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (err) {
+      console.warn('updateConversationTopic notice:', err);
     }
   },
 
@@ -141,7 +163,7 @@ export const MessagingService = {
     bookingReference?: string;
     roomNumber?: string;
     activeThemeName?: string;
-  }): Promise<string | null> {
+  }): Promise<{ reply: string | null; engine?: string; aiNotice?: string | null }> {
     try {
       const [homestayContext, guestContext] = await Promise.all([
         getLiveHomestayContextSnapshot(params.activeThemeName),
@@ -171,9 +193,11 @@ export const MessagingService = {
         })
       });
 
-      const data = await res.json();
-      const replyText = data?.reply?.trim();
-      if (!replyText) return null;
+      const data = await res.json().catch(() => ({}));
+      const replyText = String(data?.reply || '').trim();
+      if (!replyText) {
+        return { reply: null, aiNotice: data?.error || 'Auto-reply temporarily unavailable.' };
+      }
 
       await this.sendMessage(
         params.conversationId,
@@ -190,55 +214,93 @@ export const MessagingService = {
         }
       );
 
-      return replyText;
-    } catch (err) {
+      return {
+        reply: replyText,
+        engine: data?.engine || 'gemini',
+        aiNotice: data?.aiNotice || null
+      };
+    } catch (err: any) {
       console.error('triggerAdminAutoReply error:', err);
-      return null;
+      return { reply: null, aiNotice: err?.message || 'Could not deliver instant desk reply.' };
     }
   },
 
-  // Subscribe to real-time messages in a conversation
-  subscribeMessages(conversationId: string, callback: (messages: SupportMessage[]) => void) {
+  // Subscribe to real-time messages in a conversation (with error callback so UI never hangs)
+  subscribeMessages(
+    conversationId: string,
+    callback: (messages: SupportMessage[]) => void,
+    onError?: (err: Error) => void
+  ) {
     const q = query(
       collection(db, 'conversations', conversationId, 'messages'),
       orderBy('timestamp', 'asc')
     );
 
-    return onSnapshot(q, (snapshot) => {
-      const msgs = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as Omit<SupportMessage, 'id'>)
-      }));
-      callback(msgs);
-    });
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const msgs = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<SupportMessage, 'id'>)
+        }));
+        callback(msgs);
+      },
+      (err) => {
+        console.warn('subscribeMessages listener error:', err);
+        if (onError) onError(err);
+        callback([]);
+      }
+    );
   },
 
   // Subscribe to a specific conversation document
-  subscribeConversation(conversationId: string, callback: (conv: SupportConversation | null) => void) {
+  subscribeConversation(
+    conversationId: string,
+    callback: (conv: SupportConversation | null) => void,
+    onError?: (err: Error) => void
+  ) {
     const ref = doc(db, 'conversations', conversationId);
-    return onSnapshot(ref, (snap) => {
-      if (snap.exists()) {
-        callback({ id: snap.id, ...(snap.data() as Omit<SupportConversation, 'id'>) });
-      } else {
-        callback(null);
+    return onSnapshot(
+      ref,
+      (snap) => {
+        if (snap.exists()) {
+          callback({ id: snap.id, ...(snap.data() as Omit<SupportConversation, 'id'>) });
+        } else {
+          callback(null);
+        }
+      },
+      (err) => {
+        console.warn('subscribeConversation listener error:', err);
+        if (onError) onError(err);
       }
-    });
+    );
   },
 
   // Admin: Subscribe to all conversations
-  subscribeAllConversations(callback: (conversations: SupportConversation[]) => void) {
+  subscribeAllConversations(
+    callback: (conversations: SupportConversation[]) => void,
+    onError?: (err: Error) => void
+  ) {
     const q = query(
       collection(db, 'conversations'),
       orderBy('lastMessageAt', 'desc')
     );
 
-    return onSnapshot(q, (snapshot) => {
-      const convs = snapshot.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as Omit<SupportConversation, 'id'>)
-      }));
-      callback(convs);
-    });
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const convs = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<SupportConversation, 'id'>)
+        }));
+        callback(convs);
+      },
+      (err) => {
+        console.warn('subscribeAllConversations listener error:', err);
+        if (onError) onError(err);
+        callback([]);
+      }
+    );
   },
 
   // Admin: Update status (clean without undefined fields)

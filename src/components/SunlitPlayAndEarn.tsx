@@ -1,7 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { UserGameProgress, GameRewardVoucher } from '../types';
+import { UserGameProgress, GameRewardVoucher, LoyaltyTier } from '../types';
 import { getUserGameProgress, getUserRewardVouchers } from '../services/db';
+import {
+  getUserLoyaltySummary,
+  awardGamePointsToLoyalty,
+  redeemLoyaltyPointsForVoucher,
+  POINTS_TO_RUPEE_RATE,
+  LOYALTY_TIERS
+} from '../services/loyaltyService';
 import {
   playCollectSound,
   playPowerUpSound,
@@ -207,7 +214,7 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
   onClose,
   onSelectVoucherForBooking
 }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, refreshProfile } = useAuth();
   const [activeTab, setActiveTab] = useState<
     'games_menu' | 'ganga_quest' | 'runner' | 'memory' | 'brain_quest' | 'store' | 'vouchers'
   >('games_menu');
@@ -215,8 +222,10 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
   // Sound state
   const [isMuted, setIsMuted] = useState(false);
 
-  // Backend state
+  // Unified Loyalty + Arcade state
   const [progress, setProgress] = useState<UserGameProgress | null>(null);
+  const [loyaltyPoints, setLoyaltyPoints] = useState<number>(0);
+  const [loyaltyTier, setLoyaltyTier] = useState<LoyaltyTier>('explorer');
   const [vouchers, setVouchers] = useState<GameRewardVoucher[]>([]);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
@@ -225,6 +234,7 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
   const sessionStartRef = useRef<number>(Date.now());
   const [pointsAwardedThisSession, setPointsAwardedThisSession] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRedeeming, setIsRedeeming] = useState(false);
 
   // ----------------------------------------------------
   // GAME 1: SUNLIT GANGA RAPIDS PRO STATE
@@ -347,14 +357,17 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
     });
   };
 
-  // Load user game data
+  // Load unified loyalty + arcade game data
   const loadUserGameData = useCallback(async () => {
     if (!currentUser) return;
     try {
-      const [prog, vouch] = await Promise.all([
+      const [loyaltySummary, prog, vouch] = await Promise.all([
+        getUserLoyaltySummary(currentUser.uid),
         getUserGameProgress(currentUser.uid),
         getUserRewardVouchers(currentUser.uid)
       ]);
+      setLoyaltyPoints(loyaltySummary.points);
+      setLoyaltyTier(loyaltySummary.tier);
       setProgress(prog);
       setVouchers(vouch);
     } catch (err) {
@@ -429,36 +442,75 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
     };
   }, [activeTab, runnerState, g1State]);
 
-  // Submit verified session points
+  // Submit verified session points and credit directly to Sunlit Rewards Loyalty Balance
   const finishSession = useCallback(
-    async (tokensEarned: number, durationSec: number) => {
+    async (tokensEarned: number, durationSec: number, gameName: string = 'Sunlit Arcade') => {
       if (!currentUser) return;
       setIsSubmitting(true);
       try {
-        const res = await fetch('/api/game/award-points', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: currentUser.uid,
-            tokensCollected: Math.max(2, Math.round(tokensEarned)),
-            durationSeconds: Math.max(7, Math.round(durationSec))
-          })
-        });
-        const data = await res.json();
-        if (data.success) {
-          setPointsAwardedThisSession(data.pointsAwarded || 0);
-          setStatusNotice(data.message || `Awarded ${data.pointsAwarded} points!`);
-          await loadUserGameData();
-        } else {
-          setStatusNotice(data.message || 'Could not verify points.');
+        const cleanTokens = Math.max(2, Math.round(tokensEarned));
+        const cleanDuration = Math.max(5, Math.round(durationSec));
+        let pointsToCredit = Math.min(40, Math.max(5, Math.floor(cleanTokens / 4)));
+        let serverDailyTotal: number | undefined;
+        let serverMessage = '';
+
+        try {
+          const res = await fetch('/api/game/award-points', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: currentUser.uid,
+              tokensCollected: cleanTokens,
+              durationSeconds: cleanDuration
+            })
+          });
+          const data = await res.json();
+          if (data.success) {
+            pointsToCredit = Number(data.pointsAwarded) || 0;
+            serverDailyTotal = typeof data.dailyTotal === 'number' ? data.dailyTotal : undefined;
+            serverMessage = data.message || '';
+          } else {
+            setStatusNotice(data.message || 'Play a little longer to verify points.');
+            return;
+          }
+        } catch {
+          // Local deterministic fallback if server endpoint is momentarily unreachable
+          const todayEarned = progress?.dailyPointsEarned ?? 0;
+          const remainingDaily = Math.max(0, 200 - todayEarned);
+          pointsToCredit = Math.min(pointsToCredit, remainingDaily);
         }
+
+        if (pointsToCredit <= 0) {
+          setPointsAwardedThisSession(0);
+          setStatusNotice(serverMessage || 'Daily arcade earning cap (200 pts) reached for today! Come back tomorrow.');
+          return;
+        }
+
+        const loyaltyRes = await awardGamePointsToLoyalty({
+          userId: currentUser.uid,
+          pointsAwarded: pointsToCredit,
+          gameName,
+          tokensCollected: cleanTokens,
+          dailyTotal: serverDailyTotal,
+          score: cleanTokens
+        });
+
+        setPointsAwardedThisSession(pointsToCredit);
+        setLoyaltyPoints(loyaltyRes.newBalance);
+        setLoyaltyTier(loyaltyRes.newTier);
+        setStatusNotice(
+          `+${pointsToCredit} pts added to your Sunlit Rewards Loyalty Balance (${loyaltyRes.newBalance} pts = ₹${Math.floor(loyaltyRes.newBalance * POINTS_TO_RUPEE_RATE)} stay credit)!`
+        );
+
+        await Promise.all([loadUserGameData(), refreshProfile()]);
       } catch (err: any) {
         console.error('Points submission failed:', err);
+        setStatusNotice(err?.message || 'Could not save game points to loyalty wallet. Please try again.');
       } finally {
         setIsSubmitting(false);
       }
     },
-    [currentUser, loadUserGameData]
+    [currentUser, loadUserGameData, progress?.dailyPointsEarned, refreshProfile]
   );
 
   // ----------------------------------------------------
@@ -750,7 +802,7 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
               if (g1HpRef.current <= 0) {
                 setG1State('gameover');
                 const durSec = Math.floor((Date.now() - sessionStartRef.current) / 1000);
-                finishSession(g1ScoreRef.current, durSec);
+                finishSession(g1ScoreRef.current, durSec, 'Ganga Rapids Pro');
                 ctx.restore();
                 return;
               }
@@ -1338,7 +1390,7 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
             runnerShakeRef.current = 14;
             setRunnerState('gameover');
             const durSec = Math.floor((Date.now() - sessionStartRef.current) / 1000);
-            finishSession(runnerScoreRef.current, durSec);
+            finishSession(runnerScoreRef.current, durSec, 'Lakshman Jhula Sky Runner');
             ctx.restore();
             return;
           }
@@ -1542,7 +1594,7 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
               playVictorySound();
               const bonusTokens = (memoryDifficulty === 'master' ? 50 : 30) + nextStreak * 4;
               const dur = Math.max(8, Math.floor((Date.now() - sessionStartRef.current) / 1000));
-              finishSession(bonusTokens, dur);
+              finishSession(bonusTokens, dur, 'Sanctuary Match 3D');
             }
             return next;
           });
@@ -1633,40 +1685,68 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
         setQuizState('completed');
         playVictorySound();
         const dur = Math.max(8, Math.floor((Date.now() - sessionStartRef.current) / 1000));
-        finishSession(quizScore + delta, dur);
+        finishSession(quizScore + delta, dur, 'Tapovan Trivia Showdown');
       }
     }, 1500);
   };
 
-  // Reward redemption
-  const handleRedeemVoucher = async (pointsCost: number, discountAmount: number) => {
-    if (!currentUser) return;
-    if (!progress || progress.pointsBalance < pointsCost) {
-      setStatusNotice(`You need ${pointsCost} points to redeem this voucher.`);
+  // Reward redemption backed by unified Sunlit Loyalty points + Firestore gameVouchers
+  const handleRedeemVoucher = async (pointsCost: number, discountAmount: number, rewardName: string) => {
+    if (!currentUser || isRedeeming) return;
+    if (loyaltyPoints < pointsCost) {
+      setStatusNotice(`You need ${pointsCost} loyalty points to redeem this ₹${discountAmount} voucher (current: ${loyaltyPoints} pts).`);
       return;
     }
 
+    setIsRedeeming(true);
     try {
-      const res = await fetch('/api/game/redeem-voucher', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: currentUser.uid,
-          discountAmount,
-          minBookingAmount: discountAmount >= 250 ? 2000 : 800
-        })
-      });
-      const data = await res.json();
-      if (data.success) {
-        playVictorySound();
-        setStatusNotice(`Redeemed voucher ${data.code} for ₹${discountAmount} off!`);
-        await loadUserGameData();
-        setActiveTab('vouchers');
-      } else {
-        setStatusNotice(data.message || 'Could not redeem voucher.');
+      const minBookingAmount = discountAmount >= 250 ? 1500 : discountAmount >= 100 ? 799 : 599;
+      let voucherCode = `GANGA${discountAmount}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+      try {
+        const res = await fetch('/api/game/redeem-voucher', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: currentUser.uid,
+            discountAmount,
+            minBookingAmount
+          })
+        });
+        const data = await res.json();
+        if (data.success && data.code) {
+          voucherCode = data.code;
+        }
+      } catch {
+        // Proceed with locally generated unique voucher code persisted in Firestore
       }
+
+      const redeemed = await redeemLoyaltyPointsForVoucher({
+        userId: currentUser.uid,
+        userEmail: currentUser.email || '',
+        pointsCost,
+        discountAmount,
+        minBookingAmount,
+        voucherCode,
+        rewardName
+      });
+
+      if (!redeemed.success) {
+        setStatusNotice(redeemed.error || 'Could not redeem voucher.');
+        return;
+      }
+
+      playVictorySound();
+      setLoyaltyPoints(redeemed.newBalance);
+      setStatusNotice(
+        `Redeemed voucher ${voucherCode} for ₹${discountAmount} off! Click "Apply in Booking" to use it right away.`
+      );
+      await Promise.all([loadUserGameData(), refreshProfile()]);
+      setActiveTab('vouchers');
     } catch (err: any) {
-      setStatusNotice(err.message || 'Failed to redeem voucher.');
+      setStatusNotice(err?.message || 'Failed to redeem voucher.');
+    } finally {
+      setIsRedeeming(false);
     }
   };
 
@@ -1724,21 +1804,36 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
 
         {/* WALLET & NAVIGATION STRIP */}
         <div className="bg-slate-950 px-5 sm:px-6 py-2.5 text-white flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 border-b border-slate-800">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 sm:gap-4 flex-wrap">
             <div className="flex items-center gap-1.5">
               <Award className="w-4 h-4 text-amber-400" />
-              <span className="text-slate-400">Arcade Balance:</span>
+              <span className="text-slate-400">Sunlit Loyalty Balance:</span>
               <span className="font-black text-amber-300 text-sm tabular-nums">
-                {progress?.pointsBalance ?? 0} pts
+                {loyaltyPoints} pts
+              </span>
+              <span className="text-[10px] text-emerald-300 bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 rounded font-bold tabular-nums">
+                = ₹{Math.floor(loyaltyPoints * POINTS_TO_RUPEE_RATE)} credit
               </span>
             </div>
             <div className="flex items-center gap-1.5 text-slate-400 text-[11px]">
               <Zap className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Daily Cap:</span>
+              <span>Daily Arcade Cap:</span>
               <span className="text-emerald-400 font-bold tabular-nums">
-                {progress?.dailyPointsEarned ?? 0} / 100 pts
+                {progress?.dailyPointsEarned ?? 0} / 200 pts
               </span>
             </div>
+            {onSelectVoucherForBooking && loyaltyPoints >= 50 && (
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectVoucherForBooking('');
+                  onClose();
+                }}
+                className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-300 font-bold text-[11px] transition cursor-pointer"
+              >
+                Spend Points in Booking →
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5">
@@ -2548,28 +2643,52 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
         {/* ==================================================== */}
         {activeTab === 'store' && (
           <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-            <div className="rounded-2xl border border-amber-500/25 bg-gradient-to-r from-amber-500/15 via-amber-600/5 to-transparent p-4 flex items-center justify-between">
+            <div className="rounded-2xl border border-amber-500/25 bg-gradient-to-r from-amber-500/15 via-amber-600/5 to-transparent p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">
-                  Available Arcade Balance
+                  Unified Sunlit Rewards + Game Points ({LOYALTY_TIERS[loyaltyTier]?.name || 'Sunlit Explorer'})
                 </span>
-                <span className="text-2xl font-black text-white tabular-nums">
-                  {progress?.pointsBalance ?? 0} Points
-                </span>
+                <div className="flex items-baseline gap-2.5 mt-0.5">
+                  <span className="text-2xl font-black text-white tabular-nums">
+                    {loyaltyPoints} Points
+                  </span>
+                  <span className="text-xs font-bold text-emerald-400">
+                    (Worth ₹{Math.floor(loyaltyPoints * POINTS_TO_RUPEE_RATE)} direct booking discount)
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-300 mt-1">
+                  All game points sync straight into your Sunlit Rewards profile! Spend them directly in Room Checkout OR convert them into shareable discount vouchers below.
+                </p>
               </div>
-              <button
-                onClick={() => setActiveTab('games_menu')}
-                className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer"
-              >
-                Play Games to Earn
-              </button>
+              <div className="flex flex-wrap gap-2 shrink-0">
+                {onSelectVoucherForBooking && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectVoucherForBooking('');
+                      onClose();
+                    }}
+                    className="px-4 py-2 bg-emerald-400 hover:bg-emerald-300 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer"
+                  >
+                    Use Directly in Booking
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('games_menu')}
+                  className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-black transition cursor-pointer"
+                >
+                  Play Games to Earn
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               {[
-                { name: 'Ganga Explorer', pts: 50, disc: 50, desc: '₹50 flat discount on any room booking', badge: '' },
-                { name: 'Tapovan Pilgrim', pts: 100, disc: 100, desc: '₹100 flat discount on minimum 1-night stay', badge: 'Popular' },
-                { name: 'Himalayan Patron', pts: 250, disc: 250, desc: '₹250 flat discount on 2+ nights stay', badge: 'VIP Value' }
+                { name: 'Arcade Starter', pts: 50, disc: 25, desc: '₹25 off any stay (min ₹599)', badge: 'Easy Unlock' },
+                { name: 'Ganga Explorer', pts: 100, disc: 50, desc: '₹50 off any stay (min ₹599)', badge: '' },
+                { name: 'Tapovan Pilgrim', pts: 200, disc: 100, desc: '₹100 off stays ₹799+', badge: 'Popular' },
+                { name: 'Himalayan Patron', pts: 500, disc: 250, desc: '₹250 off stays ₹1,500+', badge: 'VIP Value' }
               ].map((tier) => (
                 <div
                   key={tier.name}
@@ -2586,14 +2705,19 @@ export const SunlitPlayAndEarn: React.FC<SunlitPlayAndEarnProps> = ({
                     </div>
                     <h5 className="font-extrabold text-white text-sm">{tier.name}</h5>
                     <p className="text-xs text-slate-400 mt-0.5">{tier.desc}</p>
-                    <div className="text-xs font-bold text-amber-400 mt-2 tabular-nums">Cost: {tier.pts} Points</div>
+                    <div className="text-xs font-bold text-amber-400 mt-2 tabular-nums">Cost: {tier.pts} Loyalty Pts</div>
                   </div>
                   <button
-                    disabled={(progress?.pointsBalance ?? 0) < tier.pts}
-                    onClick={() => handleRedeemVoucher(tier.pts, tier.disc)}
+                    type="button"
+                    disabled={isRedeeming || loyaltyPoints < tier.pts}
+                    onClick={() => handleRedeemVoucher(tier.pts, tier.disc, tier.name)}
                     className="w-full py-2.5 bg-amber-400 hover:bg-amber-300 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 rounded-xl font-black text-xs transition cursor-pointer"
                   >
-                    {(progress?.pointsBalance ?? 0) < tier.pts ? `Needs ${tier.pts} Pts` : 'Redeem Voucher'}
+                    {isRedeeming
+                      ? 'Redeeming...'
+                      : loyaltyPoints < tier.pts
+                      ? `Needs ${tier.pts} Pts`
+                      : 'Redeem Voucher'}
                   </button>
                 </div>
               ))}

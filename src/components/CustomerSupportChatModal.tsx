@@ -58,6 +58,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
   const [sending, setSending] = useState(false);
   const [isAutoReplying, setIsAutoReplying] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
+  const [chatNotice, setChatNotice] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // Auto scroll to bottom
@@ -69,12 +70,14 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
     scrollToBottom();
   }, [messages, isAutoReplying]);
 
-  // Load or create conversation on open
+  // Load or create conversation on open (do NOT re-subscribe on topic pill click)
   useEffect(() => {
     if (!isOpen || !currentUser) return;
 
+    let isCancelled = false;
     let unsubMessages: (() => void) | undefined;
     setLoadingConv(true);
+    setChatNotice(null);
 
     const init = async () => {
       try {
@@ -85,30 +88,53 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
             email: currentUser.email || '',
             phone: userProfile?.phone || ''
           },
-          topic,
+          initialTopic,
           bookingReference,
           roomNumber
         );
 
+        if (isCancelled) return;
         setConversationId(convId);
-        await MessagingService.markReadByCustomer(convId);
+        await MessagingService.markReadByCustomer(convId).catch(() => {});
 
-        unsubMessages = MessagingService.subscribeMessages(convId, (msgs) => {
-          setMessages(msgs);
-          setLoadingConv(false);
-        });
-      } catch (err) {
+        unsubMessages = MessagingService.subscribeMessages(
+          convId,
+          (msgs) => {
+            if (!isCancelled) {
+              setMessages(msgs);
+              setLoadingConv(false);
+            }
+          },
+          (err) => {
+            if (!isCancelled) {
+              setChatNotice(`Connection notice: ${err.message}`);
+              setLoadingConv(false);
+            }
+          }
+        );
+      } catch (err: any) {
         console.error('Failed to init conversation:', err);
-        setLoadingConv(false);
+        if (!isCancelled) {
+          setChatNotice(err?.message || 'Could not open host desk chat. Please try again.');
+          setLoadingConv(false);
+        }
       }
     };
 
     init();
 
     return () => {
+      isCancelled = true;
       if (unsubMessages) unsubMessages();
     };
-  }, [isOpen, currentUser, topic, bookingReference, roomNumber, userProfile?.fullName, userProfile?.phone]);
+  }, [isOpen, currentUser?.uid, bookingReference, roomNumber]);
+
+  const handleSelectTopic = (nextTopic: SupportTopic) => {
+    setTopic(nextTopic);
+    if (conversationId) {
+      MessagingService.updateConversationTopic(conversationId, nextTopic).catch(() => {});
+    }
+  };
 
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputMessage).trim();
@@ -116,6 +142,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
 
     const snapshotHistory = [...messages];
     if (!textToSend) setInputMessage('');
+    setChatNotice(null);
 
     try {
       setSending(true);
@@ -132,7 +159,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
 
       // Immediately generate and deliver the best personalized Admin reply using live homestay + world data
       setIsAutoReplying(true);
-      await MessagingService.triggerAdminAutoReply({
+      const autoRes = await MessagingService.triggerAdminAutoReply({
         conversationId,
         topic,
         customerName: userProfile?.fullName || currentUser.displayName || 'Guest',
@@ -144,8 +171,12 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
         roomNumber,
         activeThemeName: themeMeta.name
       });
-    } catch (err) {
+      if (autoRes.aiNotice) {
+        setChatNotice(autoRes.aiNotice);
+      }
+    } catch (err: any) {
       console.error('Failed to send support message:', err);
+      setChatNotice(err?.message || 'Could not send message. Please check your connection and try again.');
     } finally {
       setSending(false);
       setIsAutoReplying(false);
@@ -217,7 +248,7 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
               {SUPPORT_TOPICS.map((t) => (
                 <button
                   key={t}
-                  onClick={() => setTopic(t)}
+                  onClick={() => handleSelectTopic(t)}
                   className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition cursor-pointer ${
                     topic === t
                       ? 'bg-amber-500 text-slate-950 font-semibold shadow'
@@ -323,6 +354,12 @@ export const CustomerSupportChatModal: React.FC<CustomerSupportChatModalProps> =
                 <div className="flex items-start gap-2 text-xs text-emerald-300/90 bg-slate-800/60 border border-emerald-500/20 rounded-2xl px-3.5 py-2.5 max-w-[80%]">
                   <Bot className="w-4 h-4 text-emerald-400 animate-spin shrink-0 mt-0.5" />
                   <span>Subhashish Pandey · Host Desk is preparing your instant smart reply...</span>
+                </div>
+              )}
+
+              {chatNotice && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-950/40 px-3 py-2 text-[11px] text-amber-200/90">
+                  {chatNotice}
                 </div>
               )}
 

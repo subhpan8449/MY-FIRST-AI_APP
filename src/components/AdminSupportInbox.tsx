@@ -32,18 +32,22 @@ export const AdminSupportInbox: React.FC = () => {
   const [internalNoteText, setInternalNoteText] = useState('');
   const [generatingAI, setGeneratingAI] = useState(false);
   const [sending, setSending] = useState(false);
+  const [inboxNotice, setInboxNotice] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Subscribe to all conversations in real time
+  // Subscribe to all conversations in real time (single stable listener)
   useEffect(() => {
-    const unsub = MessagingService.subscribeAllConversations((convs) => {
-      setConversations(convs);
-      if (convs.length > 0 && !selectedConvId) {
-        setSelectedConvId(convs[0].id);
+    const unsub = MessagingService.subscribeAllConversations(
+      (convs) => {
+        setConversations(convs);
+        setSelectedConvId((prev) => prev || (convs.length > 0 ? convs[0].id : null));
+      },
+      (err) => {
+        setInboxNotice(`Inbox stream notice: ${err.message}`);
       }
-    });
+    );
     return () => unsub();
-  }, [selectedConvId]);
+  }, []);
 
   // Subscribe to selected conversation
   useEffect(() => {
@@ -53,17 +57,25 @@ export const AdminSupportInbox: React.FC = () => {
       return;
     }
 
-    const unsubConv = MessagingService.subscribeConversation(selectedConvId, (conv) => {
-      setSelectedConv(conv);
-      if (conv) {
-        setInternalNoteText(conv.internalNotes || '');
-      }
-    });
+    const unsubConv = MessagingService.subscribeConversation(
+      selectedConvId,
+      (conv) => {
+        setSelectedConv(conv);
+        if (conv) {
+          setInternalNoteText(conv.internalNotes || '');
+        }
+      },
+      (err) => setInboxNotice(`Conversation sync notice: ${err.message}`)
+    );
 
-    const unsubMsgs = MessagingService.subscribeMessages(selectedConvId, (msgs) => {
-      setMessages(msgs);
-      MessagingService.markReadByAdmin(selectedConvId).catch(() => {});
-    });
+    const unsubMsgs = MessagingService.subscribeMessages(
+      selectedConvId,
+      (msgs) => {
+        setMessages(msgs);
+        MessagingService.markReadByAdmin(selectedConvId).catch(() => {});
+      },
+      (err) => setInboxNotice(`Message sync notice: ${err.message}`)
+    );
 
     return () => {
       unsubConv();
@@ -80,6 +92,7 @@ export const AdminSupportInbox: React.FC = () => {
 
     try {
       setSending(true);
+      setInboxNotice(null);
       await MessagingService.sendMessage(
         selectedConvId,
         {
@@ -90,8 +103,9 @@ export const AdminSupportInbox: React.FC = () => {
         replyText
       );
       setReplyText('');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to send admin reply:', err);
+      setInboxNotice(err?.message || 'Failed to send reply. Please check permissions.');
     } finally {
       setSending(false);
     }
@@ -101,6 +115,7 @@ export const AdminSupportInbox: React.FC = () => {
     if (!selectedConv) return;
     try {
       setGeneratingAI(true);
+      setInboxNotice(null);
       const draft = await MessagingService.fetchAIDraftReply({
         topic: selectedConv.topic,
         customerName: selectedConv.customerName,
@@ -111,9 +126,12 @@ export const AdminSupportInbox: React.FC = () => {
       });
       if (draft) {
         setReplyText(draft);
+      } else {
+        setInboxNotice('Could not generate draft reply right now.');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('AI draft generation failed:', err);
+      setInboxNotice(err?.message || 'AI draft generation failed.');
     } finally {
       setGeneratingAI(false);
     }
@@ -395,15 +413,20 @@ export const AdminSupportInbox: React.FC = () => {
 
               {/* AI Draft Suggestion Button + Reply Composer */}
               <div className="border-t border-slate-800 bg-slate-950/80 p-4">
+                {inboxNotice && (
+                  <div className="mb-2 rounded-lg border border-amber-500/30 bg-amber-950/40 px-3 py-1.5 text-[11px] text-amber-200">
+                    {inboxNotice}
+                  </div>
+                )}
                 <div className="flex items-center justify-between mb-2">
                   <button
                     type="button"
                     onClick={handleGenerateAIDraft}
                     disabled={generatingAI}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition disabled:opacity-50 cursor-pointer"
                   >
                     <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                    {generatingAI ? 'Drafting with Gemini...' : 'Generate AI Suggested Reply'}
+                    {generatingAI ? 'Drafting Smart Reply...' : 'Generate AI Suggested Reply'}
                   </button>
                   <span className="text-[11px] text-slate-500">Edit draft before sending</span>
                 </div>

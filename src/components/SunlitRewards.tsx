@@ -194,6 +194,14 @@ export const SunlitRewards: React.FC<SunlitRewardsProps> = ({
                       <span className="tabular-nums">{stayStats.totalNights} Total Nights</span>
                       <span className="text-stone-500">·</span>
                       <span>Earn Rate: {tierInfo.pointsRate} pts / ₹100</span>
+                      {(summary?.gamePointsTotal ?? 0) > 0 && (
+                        <>
+                          <span className="text-stone-500">·</span>
+                          <span className="text-emerald-300 tabular-nums">
+                            +{summary?.gamePointsTotal} Arcade Game Pts Included
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -351,7 +359,7 @@ export const SunlitRewards: React.FC<SunlitRewardsProps> = ({
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               {LOYALTY_REWARD_OPTIONS.map((rew) => {
                 const canAfford = currentPoints >= rew.pointsRequired;
                 return (
@@ -498,7 +506,7 @@ export const SunlitRewards: React.FC<SunlitRewardsProps> = ({
                 Guest Profile &amp; Sunlit Rewards Club
               </h3>
               <p className="text-[11px] text-amber-200/80">
-                Earn loyalty points on every completed stay · Redeem directly at booking checkout
+                Stay completions + Play &amp; Earn Arcade points automatically unified · Redeem directly at booking checkout
               </p>
             </div>
           </div>
